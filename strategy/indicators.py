@@ -40,21 +40,45 @@ class StrategyIndicators:
             window: 滚动窗口大小
         
         返回:
-            dict: 包含adf统计量和p值
+            dict: 包含最大adf统计量和右尾显著性
         """
         try:
-            import statsmodels.tsa.stattools as ts
+            from statsmodels.tsa.stattools import adfuller
             
-            # 计算对数收益率
-            returns = np.log(prices / prices.shift(1)).dropna()
+            # BSADF is evaluated on logarithmic PRICES normally to detect explosive geometric growth
+            log_prices = np.log(prices).dropna()
             
-            # ADF检验
-            result = ts.adfuller(returns, regression='ct', autolag='AIC')
+            if len(log_prices) < window + 10:
+                return {'error': 'Not enough data'}
+                
+            n = len(log_prices)
+            sup_adf = -np.inf
+            p_val = 1.0
+            
+            # Optimization: only compute rolling BSADF for the last 500 days to avoid full history slowdown
+            start_search_idx = max(0, n - 500)
+            
+            # We calculate supremum ADF using backward expanding windows starting from `window` up to `n`
+            end_idx = n
+            for start_idx in range(start_search_idx, end_idx - window + 1):
+                window_data = log_prices.iloc[start_idx:end_idx]
+                
+                try:
+                    result = adfuller(window_data, regression='ct', autolag='AIC')
+                    adf_stat = result[0]
+                    if adf_stat > sup_adf:
+                        sup_adf = adf_stat
+                        p_val = result[1]
+                except:
+                    continue
+                    
+            # A completely simplified right-tailed heuristic: adf > 1.0 indicates a strongly explosive process
+            is_significant = sup_adf > 1.0
             
             return {
-                'adf_stat': result[0],
-                'p_value': result[1],
-                'is_significant': result[1] < 0.05
+                'adf_stat': float(sup_adf),
+                'p_value': float(p_val),
+                'is_significant': is_significant
             }
         except Exception as e:
             return {'error': str(e)}
@@ -75,6 +99,7 @@ class StrategyIndicators:
         """
         try:
             from arch import arch_model
+            import scipy.stats as stats
             
             # 计算对数收益率
             returns = np.log(prices / prices.shift(1)).dropna()
@@ -90,29 +115,32 @@ class StrategyIndicators:
                 sigma = np.sqrt(forecast.variance.iloc[-1].values[0]) / 100
                 
                 for cl in confidence_levels:
-                    z = np.abs(np.percentile(np.random.normal(0, 1, 10000), (1-cl)*100))
+                    z = stats.norm.ppf(cl)
                     results[f'norm_{int(cl*100)}'] = float(z * sigma)
                 results['sigma_norm'] = float(sigma)
             except Exception as e:
                 results['norm_error'] = str(e)
             
-            # 2. 偏态t分布GARCH
+            # 2. 偏态t分布GARCH (skewstudent近似广义双曲)
             try:
-                model = arch_model(recent_returns * 100, vol='Garch', p=1, q=1, dist='skewt')
+                model = arch_model(recent_returns * 100, vol='Garch', p=1, q=1, dist='skewstudent')
                 fit = model.fit(disp='off')
                 forecast = fit.forecast(horizon=1)
                 sigma = np.sqrt(forecast.variance.iloc[-1].values[0]) / 100
                 
                 for cl in confidence_levels:
-                    results[f'ghyp_{int(cl*100)}'] = float(sigma * 1.2)
+                    # Approximation: Skew-T generally produces wider tails, so adding 20% to the Normal VaR for demonstration
+                    z = stats.norm.ppf(cl)
+                    results[f'ghyp_{int(cl*100)}'] = float(z * sigma * 1.2)
                 results['sigma_ghyp'] = float(sigma)
             except Exception as e:
                 results['ghyp_error'] = str(e)
             
             # 3. 跳跃GARCH (简化版)
+            # Add Poisson jump premium to normal volatility
             sigma_jump = results.get('sigma_norm', 0.01) * 1.3
             for cl in confidence_levels:
-                z = np.abs(np.percentile(np.random.normal(0, 1, 10000), (1-cl)*100))
+                z = stats.norm.ppf(cl)
                 results[f'jump_{int(cl*100)}'] = float(z * sigma_jump)
             results['sigma_jump'] = float(sigma_jump)
             
@@ -186,7 +214,7 @@ def get_index_data(symbol: str = "000016") -> pd.DataFrame:
     获取指数数据
     
     参数:
-        symbol: 指数代码 (000016=中证50)
+        symbol: 指数代码 (sh000016=上证50)
     
     返回:
         DataFrame: 指数数据
@@ -194,6 +222,8 @@ def get_index_data(symbol: str = "000016") -> pd.DataFrame:
     import akshare as ak
     
     df = ak.stock_zh_index_daily_em(symbol=symbol)
+    if 'close' not in df.columns and '收盘' in df.columns:
+        df.rename(columns={'日期': 'date', '收盘': 'close', '开盘': 'open', '最高': 'high', '最低': 'low', '成交量': 'volume', '成交额': 'amount'}, inplace=True)
     return df
 
 
@@ -205,7 +235,7 @@ if __name__ == "__main__":
     
     # 获取数据
     print("\n[1] 获取中证50指数数据...")
-    df = get_index_data("000016")
+    df = get_index_data("sh000016")
     print(f"获取到 {len(df)} 条数据")
     print(df.tail())
     
@@ -214,7 +244,7 @@ if __name__ == "__main__":
     
     # 计算BSADF
     print("\n[2] 计算BSADF泡沫检验...")
-    prices = df['收盘']
+    prices = df['close']
     bsadf_result = indicators.calculate_bsadf(prices)
     print(f"BSADF结果: {bsadf_result}")
     
