@@ -7,3 +7,5 @@ statsmodels
 scipy
 requests
 yfinance
+pyecharts
+streamlit-echarts
