@@ -350,7 +350,6 @@ def render_4pane_chart(
                 textstyle_opts=opts.TextStyleOpts(color="#d1d4dc", font_size=12),
             ),
             legend_opts=opts.LegendOpts(is_show=False),
-            background_color="#131722",
         )
 
         # ── 叠加线图 (EMA, BB, VaR) ──────────────────
