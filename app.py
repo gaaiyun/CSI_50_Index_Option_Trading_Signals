@@ -57,16 +57,33 @@ def get_etf_510050():
 
 @st.cache_data(ttl=300)
 def get_options_data():
-    """获取期权实时T型盘口 (akshare)"""
-    try:
-        import akshare as ak
-        df = ak.option_current_em()
+    """
+    获取期权实时T型盘口 (akshare).
+    在境外云端服务器可能无法访问中国数据源，使用线程超时防止页面阻塞。
+    """
+    import threading
+    result_holder = {"df": None, "error": None}
+
+    def _fetch():
+        try:
+            import akshare as ak
+            df = ak.option_current_em()
+            result_holder["df"] = df
+        except Exception as e:
+            result_holder["error"] = str(e)
+
+    t = threading.Thread(target=_fetch, daemon=True)
+    t.start()
+    t.join(timeout=8)          # 最多等 8 秒，保障页面加载体验
+
+    if not t.is_alive() and result_holder["df"] is not None:
+        df = result_holder["df"]
         # 筛选标的名称包含 50ETF 或者代码以100开头的上交所期权
-        # 东财接口有时标的名称是 华夏上证50ETF期权xxxx
         df_50 = df[df['名称'].str.contains('50ETF') | df['代码'].str.startswith('100')].copy()
         return df_50, "akshare"
-    except Exception as e:
-        return None, f"获取失败: {e}"
+    else:
+        err = result_holder["error"] if result_holder["error"] else "云端节点直连东财接口超时"
+        return None, f"获取失败: {err}"
 
 # ==================== 可视化库 ====================
 def render_kline_with_bsadf(df: pd.DataFrame, bsadf_result: dict):
