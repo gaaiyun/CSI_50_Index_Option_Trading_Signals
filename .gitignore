@@ -3,3 +3,9 @@ data/
 .vscode/
 .devcontainer/
 *.pyc
+
+# 🔒 密钥文件 — 绝不提交至代码仓库
+.streamlit/secrets.toml
+.env
+*.env
+secrets.toml
