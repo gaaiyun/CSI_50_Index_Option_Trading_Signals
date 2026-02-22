@@ -31,19 +31,59 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; background-color: #0e1117; color: #e0e0e0; }
-    .main-title { font-size: 1.8rem; font-weight: 600; color: #ffffff; margin-bottom: 2px; letter-spacing: 0.5px;}
-    .sub-title { font-size: 0.9rem; color: #8b92a5; margin-bottom: 24px; letter-spacing: 0.2px;}
-    .metric-card { background: #161b22; padding: 18px; border-radius: 4px; border: 1px solid #30363d; text-align: left; box-shadow: 0 1px 3px rgba(0,0,0,0.12);}
-    .metric-title { font-size: 0.85rem; color: #8b92a5; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px;}
-    .metric-value { font-size: 1.6rem; font-weight: 500; color: #ffffff; letter-spacing: 0.2px;}
-    .metric-sub { font-size: 0.75rem; color: #8b92a5; margin-top: 4px;}
-    .color-green { color: #3fb950; }
-    .color-red { color: #f85149; }
-    .color-blue { color: #58a6ff; }
-    .color-orange { color: #d29922; }
+    /* TradingView Dark Theme Palette */
+    :root {
+        --tv-bg: #131722;
+        --tv-panel: #1e222d;
+        --tv-border: #2a2e39;
+        --tv-text: #d1d4dc;
+        --tv-text-dim: #787b86;
+        --tv-green: #089981;
+        --tv-red: #f23645;
+        --tv-blue: #2962ff;
+        --tv-yellow: #f5a623;
+    }
+    
+    /* Global Overrides for Streamlit */
+    .stApp {
+        background-color: var(--tv-bg);
+        color: var(--tv-text);
+    }
+    
+    /* Typography & Headers */
+    h1, h2, h3, h4, h5, h6, p, span, div {
+        color: var(--tv-text) !important;
+        font-family: -apple-system, BlinkMacSystemFont, "Trebuchet MS", Roboto, Ubuntu, sans-serif !important;
+    }
+    
+    .main-title { font-size: 1.6rem; font-weight: 600; color: #ffffff !important; margin-bottom: 2px; letter-spacing: 0.5px;}
+    .sub-title { font-size: 0.85rem; color: var(--tv-text-dim) !important; margin-bottom: 24px;}
+    
+    /* Metric Cards */
+    .metric-card { 
+        background-color: var(--tv-panel); 
+        padding: 18px; 
+        border-radius: 4px; 
+        border: 1px solid var(--tv-border); 
+        text-align: left; 
+    }
+    .metric-title { font-size: 0.8rem; color: var(--tv-text-dim) !important; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px;}
+    .metric-value { font-size: 1.5rem; font-weight: 500; letter-spacing: 0.2px;}
+    .metric-sub { font-size: 0.75rem; color: var(--tv-text-dim) !important; margin-top: 4px;}
+    
+    /* Color Utilities */
+    .color-green { color: var(--tv-green) !important; }
+    .color-red { color: var(--tv-red) !important; }
+    .color-blue { color: var(--tv-blue) !important; }
+    .color-orange { color: var(--tv-yellow) !important; }
+    
+    /* DataFrame overriding */
     .stDataFrame { font-size: 0.85rem; }
-
+    
+    /* Hide Streamlit elements */
+    header { visibility: hidden; }
+    #MainMenu { visibility: hidden; }
+    footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -144,27 +184,67 @@ def get_options_data(force_refresh=False):
 
 # ==================== 可视化库 ====================
 def render_kline_with_bsadf(df: pd.DataFrame, bsadf_result: dict):
-    """绘制K线并在泡沫期(显著区间)高亮散点"""
+    """绘制TradingView风格K线并在泡沫期(显著区间)高亮散点"""
     try:
         # 切片最近200天显示
         plot_df = df.iloc[-200:].copy()
+        
+        # 计算移动平均线
+        plot_df['MA5'] = plot_df['Close'].rolling(window=5).mean()
+        plot_df['MA20'] = plot_df['Close'].rolling(window=20).mean()
+        
         x_data = plot_df.index.strftime('%Y-%m-%d').tolist()
         y_data = plot_df[['Open', 'Close', 'Low', 'High']].values.tolist()
+        ma5_data = [round(x, 3) if not pd.isna(x) else None for x in plot_df['MA5']]
+        ma20_data = [round(x, 3) if not pd.isna(x) else None for x in plot_df['MA20']]
         
-        kline = Kline()
+        kline = Kline(init_opts=opts.InitOpts(bg_color="#131722"))
         kline.add_xaxis(x_data)
         kline.add_yaxis(
-            "510050.SS",
+            "上证50ETF",
             y_data,
-            itemstyle_opts=opts.ItemStyleOpts(color="#ec0000", color0="#00da3c"),
+            itemstyle_opts=opts.ItemStyleOpts(
+                color="#089981",          # 阳线颜色 (TV Green)
+                color0="#f23645",         # 阴线颜色 (TV Red)
+                border_color="#089981", 
+                border_color0="#f23645"
+            ),
         )
+        
         kline.set_global_opts(
-            xaxis_opts=opts.AxisOpts(is_scale=True, splitline_opts=opts.SplitLineOpts(is_show=False)),
-            yaxis_opts=opts.AxisOpts(is_scale=True, splitline_opts=opts.SplitLineOpts(is_show=True)),
-            datazoom_opts=[opts.DataZoomOpts(type_="inside")],
-            title_opts=opts.TitleOpts(title="上证50ETF日线泡沫监控", pos_left="center"),
+            xaxis_opts=opts.AxisOpts(
+                is_scale=True, 
+                splitline_opts=opts.SplitLineOpts(is_show=True, linestyle_opts=opts.LineStyleOpts(color="#2a2e39")),
+                axislabel_opts=opts.LabelOpts(color="#787b86"),
+                axisline_opts=opts.LineStyleOpts(color="#2a2e39")
+            ),
+            yaxis_opts=opts.AxisOpts(
+                is_scale=True, 
+                splitline_opts=opts.SplitLineOpts(is_show=True, linestyle_opts=opts.LineStyleOpts(color="#2a2e39")),
+                axislabel_opts=opts.LabelOpts(color="#787b86"),
+                axisline_opts=opts.LineStyleOpts(color="#2a2e39"),
+                position="right"
+            ),
+            datazoom_opts=[
+                opts.DataZoomOpts(is_show=False, type_="inside", xaxis_index=[0]),
+                opts.DataZoomOpts(is_show=True, type_="slider", xaxis_index=[0], bottom="0px")
+            ],
+            tooltip_opts=opts.TooltipOpts(
+                trigger="axis",
+                axis_pointer_type="cross",
+                background_color="#1e222d",
+                border_color="#2a2e39",
+                textstyle_opts=opts.TextStyleOpts(color="#d1d4dc")
+            ),
             legend_opts=opts.LegendOpts(is_show=False)
         )
+        
+        # 添加均线
+        line = Line()
+        line.add_xaxis(x_data)
+        line.add_yaxis("MA5", ma5_data, is_smooth=True, is_symbol_show=False, itemstyle_opts=opts.ItemStyleOpts(color="#2962ff"), label_opts=opts.LabelOpts(is_show=False))
+        line.add_yaxis("MA20", ma20_data, is_smooth=True, is_symbol_show=False, itemstyle_opts=opts.ItemStyleOpts(color="#f5a623"), label_opts=opts.LabelOpts(is_show=False))
+        kline.overlap(line)
         
         # 叠加BSADF高亮
         if 'series' in bsadf_result and not bsadf_result['series'].empty:
@@ -172,15 +252,13 @@ def render_kline_with_bsadf(df: pd.DataFrame, bsadf_result: dict):
             cv = bsadf_result.get('cv', 1.5)
             scatter_data = []
             
-            # 对齐时间轴
             for time_str in x_data:
                 time_dt = pd.to_datetime(time_str)
                 if time_dt in bsadf_sr.index:
                     val = bsadf_sr.loc[time_dt]
                     if val > cv:
-                        # 泡沫发生，标记在K线最高点之上
                         high_price = plot_df.loc[time_dt, 'High']
-                        scatter_data.append([time_str, float(high_price * 1.01)])
+                        scatter_data.append([time_str, float(high_price * 1.015)])
                     else:
                         scatter_data.append([time_str, None])
                 else:
@@ -189,11 +267,11 @@ def render_kline_with_bsadf(df: pd.DataFrame, bsadf_result: dict):
             scatter = Scatter()
             scatter.add_xaxis(x_data)
             scatter.add_yaxis(
-                "泡沫预警区间",
+                "泡沫预警标",
                 [y[1] if y[1] is not None else "" for y in scatter_data],
                 symbol="circle",
-                symbol_size=6,
-                itemstyle_opts=opts.ItemStyleOpts(color="#fadb14"),
+                symbol_size=8,
+                itemstyle_opts=opts.ItemStyleOpts(color="#e0d12e", border_color="#ffffff", border_width=1),
                 label_opts=opts.LabelOpts(is_show=False)
             )
             kline.overlap(scatter)
@@ -264,7 +342,7 @@ if df_etf is not None and not df_etf.empty:
         sig_color = ""
 
     # ========= 核心数据面板 =========
-    st.markdown("<h4 style='color:#8b92a5; font-size:1rem; font-weight:500; margin-top:10px;'>量化引擎参数</h4>", unsafe_allow_html=True)
+    st.markdown("<h4 style='color:#d1d4dc; font-size:1.1rem; font-weight:500; margin-top:10px;'>量化引擎参数</h4>", unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
     
     with c1:
@@ -273,7 +351,7 @@ if df_etf is not None and not df_etf.empty:
         <div class="metric-card">
             <div class="metric-title">510050.SS (底层标的)</div>
             <div class="metric-value {color}">{spot:.3f}</div>
-            <div class="metric-sub">今日涨跌: <span class="{color}">{change:+.2f}%</span></div>
+            <div class="metric-sub">今日波动: <span class="{color}">{change:+.2f}%</span></div>
         </div>
         """, unsafe_allow_html=True)
     with c2:
@@ -281,15 +359,15 @@ if df_etf is not None and not df_etf.empty:
         <div class="metric-card">
             <div class="metric-title">GARCH T+1 年化预测</div>
             <div class="metric-value color-blue">{sigma:.2f}%</div>
-            <div class="metric-sub">复合模型次日方差逼近值</div>
+            <div class="metric-sub">复合模型次日方差期望</div>
         </div>
         """, unsafe_allow_html=True)
     with c3:
         st.markdown(f"""
         <div class="metric-card">
-            <div class="metric-title">VaR 95% 刚性离场带</div>
+            <div class="metric-title">VaR 95% 刚性防线</div>
             <div class="metric-value color-red">±{var_95:.2f}%</div>
-            <div class="metric-sub">期权剩余虚值空间低于此阈值立即平仓</div>
+            <div class="metric-sub">期权剩余虚值空间低于此值触发平仓</div>
         </div>
         """, unsafe_allow_html=True)
     with c4:
@@ -301,18 +379,18 @@ if df_etf is not None and not df_etf.empty:
         </div>
         """, unsafe_allow_html=True)
         
-    st.markdown("<hr style='border-top: 1px solid #30363d; margin: 25px 0;'>", unsafe_allow_html=True)
+    st.markdown("<hr style='border-top: 1px solid var(--tv-border); margin: 25px 0;'>", unsafe_allow_html=True)
     
     # ========= 高阶图表 =========
-    st.markdown("<h4 style='color:#8b92a5; font-size:1rem; font-weight:500;'>BSADF 价格泡沫预警图</h4>", unsafe_allow_html=True)
+    st.markdown("<h4 style='color:#d1d4dc; font-size:1.1rem; font-weight:500;'>BSADF 极值测试波动矩阵图</h4>", unsafe_allow_html=True)
     kline_chart = render_kline_with_bsadf(df_etf, bsadf_result)
     if kline_chart:
-        st_pyecharts(kline_chart, height="380px")
+        st_pyecharts(kline_chart, height="480px")
         
-    st.markdown("<hr style='border-top: 1px solid #30363d; margin: 25px 0;'>", unsafe_allow_html=True)
+    st.markdown("<hr style='border-top: 1px solid var(--tv-border); margin: 25px 0;'>", unsafe_allow_html=True)
     
     # ========= 期权链交易推荐 =========
-    st.markdown("<h4 style='color:#8b92a5; font-size:1rem; font-weight:500;'>期权深度虚值策略标的池</h4>", unsafe_allow_html=True)
+    st.markdown("<h4 style='color:#d1d4dc; font-size:1.1rem; font-weight:500;'>深度虚值期权雷达扫描仪</h4>", unsafe_allow_html=True)
     
     if options_df is not None and not options_df.empty:
         try:
@@ -331,23 +409,23 @@ if df_etf is not None and not df_etf.empty:
             # 高亮优选：OTM大于目标值，且距离认怂线有2%以上的缓冲
             def highlight_target(row):
                 if row['当前虚值空间(%)'] >= otm and row['距止损线缓冲(%)'] > 2.0:
-                    return ['background-color: rgba(63, 185, 80, 0.15)'] * len(row)
+                    return ['background-color: rgba(8, 153, 129, 0.2); color: #089981; font-weight: bold'] * len(row)
                 elif row['当前虚值空间(%)'] < stop_loss:
-                    return ['color: #f85149'] * len(row)
+                    return ['color: #f23645'] * len(row)
                 return [''] * len(row)
             
             # 排序后展示
             show_df = show_df.dropna(subset=['行权价']).sort_values('当前虚值空间(%)', ascending=False)
             st.dataframe(show_df.style.apply(highlight_target, axis=1), height=400, use_container_width=True)
             
-            st.markdown("<div style='font-size:0.8rem; color:#8b92a5; margin-top:5px;'>说明: 绿色底纹标识缓冲极高之优选标的，红色字体警示已击破止损阈值之危急合约。</div>", unsafe_allow_html=True)
+            st.markdown("<div style='font-size:0.8rem; color:var(--tv-text-dim); margin-top:5px;'>说明: 绿色底纹标识缓冲极高之重点关注安全合约，红色字体警示已击穿 VaR 止损红线的标的。</div>", unsafe_allow_html=True)
         except Exception as e:
             st.error(f"解析期权链失败: {e}")
             st.dataframe(options_df)
     else:
-        st.warning("数据接口未能返回期权列表，交易时段外或接口限制。")
+        st.warning("数据接口未能返回期权列表，可能处于交易时段外或接口限制。")
 
 else:
-    st.error("无法加载 510050.SS (上证50ETF) 底层价格数据，请检查网络链路或数据节点状态。")
+    st.error("无法加载 510050.SS (上证50ETF) 底层价格轨迹，请检查本地网络链路或远程数据节点状态。")
 
-st.markdown(f"<div style='text-align:right; color:#8b92a5; margin-top:20px; font-size: 0.75rem;'>数据引擎链路: yfinance + akshare | {source_etf} | {opt_source} | 强持久化缓存激活</div>", unsafe_allow_html=True)
+st.markdown(f"<div style='text-align:right; color:var(--tv-text-dim); margin-top:20px; font-size: 0.75rem;'>数据引擎链路: yfinance + akshare | {source_etf} | {opt_source} | 强持久化缓存激活</div>", unsafe_allow_html=True)
