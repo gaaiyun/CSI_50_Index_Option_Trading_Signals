@@ -87,27 +87,31 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ==================== 本地缓存管理 ====================
+# ==================== 本地缓存管理 (Stale-while-Revalidate) ====================
 DATA_DIR = "data"
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
-def load_local_cache(filename: str, ttl_seconds: int):
-    """尝试加载本地缓存数据，检查是否过期"""
+def load_local_cache(filename: str):
+    """强制加载本地旧数据，永不阻塞"""
     filepath = os.path.join(DATA_DIR, filename)
     if os.path.exists(filepath):
-        mtime = os.path.getmtime(filepath)
-        if time.time() - mtime < ttl_seconds:
-            try:
-                # 针对带有datetime index的yfinance数据特殊处理
-                if 'etf' in filename:
-                    df = pd.read_csv(filepath, index_col=0, parse_dates=True)
-                else:
-                    df = pd.read_csv(filepath)
-                return df, True
-            except:
-                pass
-    return None, False
+        try:
+            if 'etf' in filename:
+                df = pd.read_csv(filepath, index_col=0, parse_dates=True)
+            else:
+                df = pd.read_csv(filepath)
+            return df
+        except:
+            pass
+    return None
+
+def is_cache_expired(filename: str, ttl_seconds: int):
+    filepath = os.path.join(DATA_DIR, filename)
+    if not os.path.exists(filepath):
+        return True
+    mtime = os.path.getmtime(filepath)
+    return (time.time() - mtime) > ttl_seconds
 
 def save_local_cache(df: pd.DataFrame, filename: str):
     """保存数据到本地"""
@@ -118,88 +122,74 @@ def save_local_cache(df: pd.DataFrame, filename: str):
         print(f"缓存写入失败: {e}")
 
 # ==================== 数据获取 ====================
-@st.cache_data(ttl=300)
-def get_etf_510050(force_refresh=False):
-    """获取上证50ETF (510050.SS)，带本地持久化降级"""
-    cache_file = "etf_510050.csv"
-    
-    if not force_refresh:
-        df, valid = load_local_cache(cache_file, 3600*12) # 日线数据理论上存活半天
-        if valid and not df.empty:
-            return df, "yfinance (本地缓存)"
-            
+def fetch_etf_bg():
     try:
         import yfinance as yf
-        t = yf.Ticker("510050.SS")
-        df = t.history(period="3y")
-        df.index = df.index.tz_localize(None)
+        df = yf.download("510050.SS", period="5y", progress=False)
         if not df.empty:
-            save_local_cache(df, cache_file)
-        return df, "yfinance (在线刷新)"
-    except Exception as e:
-        # 如果在线挂了，即使缓存过期也强行读取兜底
-        df, _ = load_local_cache(cache_file, 999999)
-        if df is not None:
-            return df, f"yfinance (网络异常，强行读取陈旧缓存)"
-        return None, str(e)
+            df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+            save_local_cache(df, "etf_510050.csv")
+    except:
+        pass
 
-@st.cache_data(ttl=60)
-def get_options_data(force_refresh=False):
-    """获取期权实时T型盘口，带1分钟防刷及本地持久化缓存"""
-    cache_file = "options_50.csv"
-    
-    if not force_refresh:
-        df, valid = load_local_cache(cache_file, 60) # 期权盘口1分钟内不重复拉取
-        if valid and not df.empty:
-            return df, "akshare (本地缓存)"
-            
+def get_etf_510050(force_refresh=False):
+    """日线基准数据: 立即返还缓存，后台静默验证更新"""
+    cache_file = "etf_510050.csv"
     import threading
-    result_holder = {"df": None, "error": None}
+    
+    if force_refresh or is_cache_expired(cache_file, 43200): # 12 小时更新
+        threading.Thread(target=fetch_etf_bg, daemon=True).start()
+    
+    df = load_local_cache(cache_file)
+    if df is not None:
+        return df, "本地急速库"
+    return None, "待缓冲"
 
-    def _fetch():
-        try:
-            import akshare as ak
-            df_full = ak.option_current_em()
-            result_holder["df"] = df_full
-        except Exception as e:
-            result_holder["error"] = str(e)
+def fetch_options_bg():
+    try:
+        import akshare as ak
+        df_full = ak.option_current_em()
+        if df_full is not None and not df_full.empty:
+            df_50 = df_full[df_full['名称'].str.contains('50ETF') | df_full['代码'].str.startswith('100')].copy()
+            if not df_50.empty:
+                save_local_cache(df_50, "options_50.csv")
+    except:
+        pass
 
-    t = threading.Thread(target=_fetch, daemon=True)
-    t.start()
-    t.join(timeout=8)          # 最多等 8 秒
-
-    if not t.is_alive() and result_holder["df"] is not None:
-        df = result_holder["df"]
-        df_50 = df[df['名称'].str.contains('50ETF') | df['代码'].str.startswith('100')].copy()
-        if not df_50.empty:
-            save_local_cache(df_50, cache_file)
-        return df_50, "akshare (在线刷新)"
-    else:
-        # 降级读取本地兜底
-        err = result_holder["error"] if result_holder["error"] else "云端节点直连东财接口超时"
-        df, _ = load_local_cache(cache_file, 999999)
-        if df is not None:
-            return df, f"akshare (超时降级，强行读取陈旧缓存)"
-        return None, f"获取失败: {err}"
+def get_options_data(force_refresh=False):
+    """高频期权盘口: 优先本地读取，后台静默重连轮询"""
+    cache_file = "options_50.csv"
+    import threading
+    
+    if force_refresh or is_cache_expired(cache_file, 60): # 60秒过期
+        threading.Thread(target=fetch_options_bg, daemon=True).start()
+        
+    df = load_local_cache(cache_file)
+    if df is not None:
+        return df, "后台实时推流 (SWR架构)"
+    return None, "待缓冲"
 
 # ==================== 可视化库 ====================
-def render_kline_with_bsadf(df: pd.DataFrame, bsadf_result: dict):
-    """绘制TradingView风格K线并在泡沫期(显著区间)高亮散点，包含附图成交量"""
+def render_kline_with_bsadf(df: pd.DataFrame, bsadf_result: dict, var_95_val: float):
+    """绘制TradingView风格三窗格: K线主图+VaR带 | BSADF 序列 | 成交量"""
     try:
         # 切片最近200天显示
         plot_df = df.iloc[-200:].copy()
         
-        # 计算移动平均线
+        # 计算移动平均线与模拟VaR动态通道(仅做视觉参考展示历史走势)
         plot_df['MA5'] = plot_df['Close'].rolling(window=5).mean()
         plot_df['MA20'] = plot_df['Close'].rolling(window=20).mean()
+        plot_df['VaR_Upper'] = plot_df['Close'] * (1 + var_95_val/100)
+        plot_df['VaR_Lower'] = plot_df['Close'] * (1 - var_95_val/100)
         
         x_data = plot_df.index.strftime('%Y-%m-%d').tolist()
-        # Echarts Kline: [open, close, lowest, highest]
         y_data = plot_df[['Open', 'Close', 'Low', 'High']].values.tolist()
         ma5_data = [round(x, 3) if not pd.isna(x) else None for x in plot_df['MA5']]
         ma20_data = [round(x, 3) if not pd.isna(x) else None for x in plot_df['MA20']]
+        var_upper_data = [round(x, 3) for x in plot_df['VaR_Upper']]
+        var_lower_data = [round(x, 3) for x in plot_df['VaR_Lower']]
         
-        # 准备成交量数据，赋予颜色属性
+        # 准备成交量数据
         vol_data = []
         for i, row in plot_df.iterrows():
             color = "#089981" if row['Close'] >= row['Open'] else "#f23645"
@@ -211,17 +201,15 @@ def render_kline_with_bsadf(df: pd.DataFrame, bsadf_result: dict):
                 )
             )
 
-        # ========= 主图 K线 =========
+        # ========= 主图 Pane 0: K线 + VaR通道 =========
         kline = Kline()
         kline.add_xaxis(x_data)
         kline.add_yaxis(
-            "上证50ETF",
+            "上证50",
             y_data,
             itemstyle_opts=opts.ItemStyleOpts(
-                color="#089981",          # 阳线颜色 (TV Green)
-                color0="#f23645",         # 阴线颜色 (TV Red)
-                border_color="#089981", 
-                border_color0="#f23645"
+                color="#089981", color0="#f23645",
+                border_color="#089981", border_color0="#f23645"
             ),
         )
         
@@ -229,7 +217,7 @@ def render_kline_with_bsadf(df: pd.DataFrame, bsadf_result: dict):
             xaxis_opts=opts.AxisOpts(
                 is_scale=True, 
                 splitline_opts=opts.SplitLineOpts(is_show=True, linestyle_opts=opts.LineStyleOpts(color="#2a2e39")),
-                axislabel_opts=opts.LabelOpts(is_show=False), # 主图隐藏X轴标签，留给副图
+                axislabel_opts=opts.LabelOpts(is_show=False),
                 axisline_opts=opts.LineStyleOpts(color="#2a2e39"),
                 axispointer_opts=opts.AxisPointerOpts(is_show=True, type_="line")
             ),
@@ -241,8 +229,8 @@ def render_kline_with_bsadf(df: pd.DataFrame, bsadf_result: dict):
                 position="right"
             ),
             datazoom_opts=[
-                opts.DataZoomOpts(is_show=False, type_="inside", xaxis_index=[0, 1]),
-                opts.DataZoomOpts(is_show=True, type_="slider", xaxis_index=[0, 1], bottom="0px",
+                opts.DataZoomOpts(is_show=False, type_="inside", xaxis_index=[0, 1, 2]),
+                opts.DataZoomOpts(is_show=True, type_="slider", xaxis_index=[0, 1, 2], bottom="0px",
                                   data_background_opts=opts.DataZoomBackgroundOpts(
                                       lineStyle=opts.LineStyleOpts(color="#2962ff"),
                                       areaStyle=opts.AreaStyleOpts(color="rgba(41,98,255,0.2)")
@@ -260,61 +248,76 @@ def render_kline_with_bsadf(df: pd.DataFrame, bsadf_result: dict):
             legend_opts=opts.LegendOpts(is_show=False)
         )
         
-        # 添加均线
-        line = Line()
-        line.add_xaxis(x_data)
-        line.add_yaxis("MA5", ma5_data, is_smooth=True, is_symbol_show=False, itemstyle_opts=opts.ItemStyleOpts(color="#2962ff"), label_opts=opts.LabelOpts(is_show=False))
-        line.add_yaxis("MA20", ma20_data, is_smooth=True, is_symbol_show=False, itemstyle_opts=opts.ItemStyleOpts(color="#f5a623"), label_opts=opts.LabelOpts(is_show=False))
-        kline.overlap(line)
+        # 叠加MA与VaR通道
+        line_main = Line()
+        line_main.add_xaxis(x_data)
+        line_main.add_yaxis("MA5", ma5_data, is_smooth=True, is_symbol_show=False, itemstyle_opts=opts.ItemStyleOpts(color="#2962ff"), label_opts=opts.LabelOpts(is_show=False))
+        # line_main.add_yaxis("MA20", ma20_data, is_smooth=True, is_symbol_show=False, itemstyle_opts=opts.ItemStyleOpts(color="#f5a623"), label_opts=opts.LabelOpts(is_show=False))
+        line_main.add_yaxis("VaR_Upper", var_upper_data, is_smooth=True, is_symbol_show=False, itemstyle_opts=opts.ItemStyleOpts(color="rgba(242,54,69,0.5)"), linestyle_opts=opts.LineStyleOpts(type_="dashed"), label_opts=opts.LabelOpts(is_show=False))
+        line_main.add_yaxis("VaR_Lower", var_lower_data, is_smooth=True, is_symbol_show=False, itemstyle_opts=opts.ItemStyleOpts(color="rgba(242,54,69,0.5)"), linestyle_opts=opts.LineStyleOpts(type_="dashed"), label_opts=opts.LabelOpts(is_show=False))
+        kline.overlap(line_main)
         
-        # 叠加BSADF高亮
+        # ========= 副图 Pane 1: BSADF 监测 =========
+        bsadf_line = Line()
+        cv = bsadf_result.get('cv', 1.5)
+        
         if 'series' in bsadf_result and not bsadf_result['series'].empty:
             bsadf_sr = bsadf_result['series']
-            cv = bsadf_result.get('cv', 1.5)
-            scatter_data = []
+            # 对齐数据
+            b_data = []
             for time_str in x_data:
                 time_dt = pd.to_datetime(time_str)
                 if time_dt in bsadf_sr.index:
-                    val = bsadf_sr.loc[time_dt]
-                    if val > cv:
-                        high_price = plot_df.loc[time_dt, 'High']
-                        scatter_data.append([time_str, float(high_price * 1.015)])
-                    else:
-                        scatter_data.append([time_str, None])
+                    b_data.append(round(bsadf_sr.loc[time_dt], 3))
                 else:
-                    scatter_data.append([time_str, None])
+                    b_data.append(None)
                     
-            scatter = Scatter()
-            scatter.add_xaxis(x_data)
-            scatter.add_yaxis(
-                "泡沫预警标",
-                [y[1] if y[1] is not None else "" for y in scatter_data],
-                symbol="circle",
-                symbol_size=8,
-                itemstyle_opts=opts.ItemStyleOpts(color="#e0d12e", border_color="#ffffff", border_width=1),
-                label_opts=opts.LabelOpts(is_show=False)
+            bsadf_line.add_xaxis(x_data)
+            bsadf_line.add_yaxis(
+                "BSADF Stat",
+                b_data,
+                is_smooth=False,
+                is_symbol_show=False,
+                itemstyle_opts=opts.ItemStyleOpts(color="#f5a623"),
+                label_opts=opts.LabelOpts(is_show=False),
+                markline_opts=opts.MarkLineOpts(
+                    data=[opts.MarkLineItem(y=cv, name="95% 极值红线")],
+                    linestyle_opts=opts.LineStyleOpts(color="#f23645", type_="solid")
+                )
             )
-            kline.overlap(scatter)
+            
+        bsadf_line.set_global_opts(
+            xaxis_opts=opts.AxisOpts(
+                type_="category", grid_index=1,
+                axislabel_opts=opts.LabelOpts(is_show=False),
+                axisline_opts=opts.LineStyleOpts(color="#2a2e39")
+            ),
+            yaxis_opts=opts.AxisOpts(
+                is_scale=False, splitline_opts=opts.SplitLineOpts(is_show=False),
+                axislabel_opts=opts.LabelOpts(color="#787b86"),
+                axisline_opts=opts.LineStyleOpts(color="#2a2e39"),
+                position="right"
+            ),
+            legend_opts=opts.LegendOpts(is_show=False)
+        )
 
-        # ========= 副图 成交量 =========
+        # ========= 副图 Pane 2: 成交量 =========
         bar = Bar()
         bar.add_xaxis(x_data)
         bar.add_yaxis(
-            "成交量",
+            "Volume",
             vol_data,
             label_opts=opts.LabelOpts(is_show=False),
             itemstyle_opts=opts.ItemStyleOpts(color="#58a6ff")
         )
         bar.set_global_opts(
             xaxis_opts=opts.AxisOpts(
-                type_="category",
-                grid_index=1,
+                type_="category", grid_index=2,
                 axislabel_opts=opts.LabelOpts(color="#787b86"),
                 axisline_opts=opts.LineStyleOpts(color="#2a2e39")
             ),
             yaxis_opts=opts.AxisOpts(
-                is_scale=True,
-                splitline_opts=opts.SplitLineOpts(is_show=False),
+                is_scale=True, splitline_opts=opts.SplitLineOpts(is_show=False),
                 axislabel_opts=opts.LabelOpts(is_show=False),
                 axisline_opts=opts.LineStyleOpts(color="#2a2e39"),
                 position="right"
@@ -323,11 +326,13 @@ def render_kline_with_bsadf(df: pd.DataFrame, bsadf_result: dict):
         )
 
         # ========= 组合 Grid =========
-        grid_chart = Grid(init_opts=opts.InitOpts(bg_color="#131722", width="100%", height="600px"))
-        # 主图占 70% 高度
-        grid_chart.add(kline, grid_opts=opts.GridOpts(pos_left="3%", pos_right="8%", height="60%"))
-        # 副图占 20% 高度
-        grid_chart.add(bar, grid_opts=opts.GridOpts(pos_left="3%", pos_right="8%", pos_top="75%", height="20%"))
+        grid_chart = Grid(init_opts=opts.InitOpts(bg_color="#131722", width="100%", height="750px"))
+        # 主图 50%
+        grid_chart.add(kline, grid_opts=opts.GridOpts(pos_left="2%", pos_right="6%", height="50%"))
+        # BSADF 15%
+        grid_chart.add(bsadf_line, grid_opts=opts.GridOpts(pos_left="2%", pos_right="6%", pos_top="58%", height="15%"))
+        # Volume 15%
+        grid_chart.add(bar, grid_opts=opts.GridOpts(pos_left="2%", pos_right="6%", pos_top="75%", height="15%"))
 
         return grid_chart
     except Exception as e:
@@ -354,8 +359,8 @@ with st.sidebar:
     st.subheader("系统控制")
     force_refresh = st.button("强制更新数据总线", use_container_width=True)
 
-st.markdown('<div class="main-title">上证50ETF期权 机构级防御风控面板 (v4.1)</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">算法核心: 三重GARCH VaR预测 | BSADF左偏序列极值监控 | 日频实时RV熔断体系</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">VolGuard Pro: 上证50期权风控雷达</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title" style="margin-bottom:12px;">算法核心: Multi-GARCH VaR | BSADF 序列重构 | 大尺度秒开缓存框架 (v5.0)</div>', unsafe_allow_html=True)
 
 # 获取数据
 df_etf, source_etf = get_etf_510050(force_refresh=force_refresh)
@@ -428,7 +433,7 @@ if df_etf is not None and not df_etf.empty:
     with c4:
         st.markdown(f"""
         <div class="metric-card">
-            <div class="metric-title">系统交易指令</div>
+            <div class="metric-title">系统状态</div>
             <div class="metric-value {sig_color}" style="font-size: 1.1rem;">{signal}</div>
             <div class="metric-sub">{action}</div>
         </div>
@@ -436,12 +441,12 @@ if df_etf is not None and not df_etf.empty:
         
     st.markdown("<hr style='border-top: 1px solid var(--tv-border); margin: 25px 0;'>", unsafe_allow_html=True)
     
-    # ========= 高阶图表 =========
-    st.markdown("<h4 style='color:#d1d4dc; font-size:1.1rem; font-weight:500;'>BSADF 极值测试量价矩阵</h4>", unsafe_allow_html=True)
-    kline_chart = render_kline_with_bsadf(df_etf, bsadf_result)
+    # ========= 3-Pane 全景联动图表 =========
+    st.markdown("<h4 style='color:#d1d4dc; font-size:1.1rem; font-weight:500;'>Multi-GARCH 止损带 & BSADF 单位根监控仪</h4>", unsafe_allow_html=True)
+    kline_chart = render_kline_with_bsadf(df_etf, bsadf_result, var_95)
     if kline_chart:
         # Pyecharts Grid 高度定高，防止被压扁
-        st_pyecharts(kline_chart, height="600px")
+        st_pyecharts(kline_chart, height="750px")
         
     st.markdown("<hr style='border-top: 1px solid var(--tv-border); margin: 25px 0;'>", unsafe_allow_html=True)
     
