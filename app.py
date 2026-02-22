@@ -193,8 +193,8 @@ def render_kline_with_bsadf(df: pd.DataFrame, bsadf_result: dict, var_95_val: fl
         y_data = plot_df[['Open', 'Close', 'Low', 'High']].values.tolist()
         ma5_data = [round(x, 3) if not pd.isna(x) else None for x in plot_df['MA5']]
         ma20_data = [round(x, 3) if not pd.isna(x) else None for x in plot_df['MA20']]
-        var_upper_data = [round(x, 3) for x in plot_df['VaR_Upper']]
-        var_lower_data = [round(x, 3) for x in plot_df['VaR_Lower']]
+        var_upper_data = [round(x, 3) if not pd.isna(x) else None for x in plot_df['VaR_Upper']]
+        var_lower_data = [round(x, 3) if not pd.isna(x) else None for x in plot_df['VaR_Lower']]
         
         # 准备成交量数据
         vol_data = []
