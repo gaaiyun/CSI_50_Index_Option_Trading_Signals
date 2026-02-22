@@ -17,7 +17,7 @@ import time
 from datetime import datetime
 from streamlit_echarts import st_pyecharts
 from pyecharts import options as opts
-from pyecharts.charts import Kline, Scatter, Line, Grid
+from pyecharts.charts import Kline, Scatter, Line, Grid, Bar
 from strategy.indicators import StrategyIndicators
 
 # 配置
@@ -184,7 +184,7 @@ def get_options_data(force_refresh=False):
 
 # ==================== 可视化库 ====================
 def render_kline_with_bsadf(df: pd.DataFrame, bsadf_result: dict):
-    """绘制TradingView风格K线并在泡沫期(显著区间)高亮散点"""
+    """绘制TradingView风格K线并在泡沫期(显著区间)高亮散点，包含附图成交量"""
     try:
         # 切片最近200天显示
         plot_df = df.iloc[-200:].copy()
@@ -194,11 +194,25 @@ def render_kline_with_bsadf(df: pd.DataFrame, bsadf_result: dict):
         plot_df['MA20'] = plot_df['Close'].rolling(window=20).mean()
         
         x_data = plot_df.index.strftime('%Y-%m-%d').tolist()
+        # Echarts Kline: [open, close, lowest, highest]
         y_data = plot_df[['Open', 'Close', 'Low', 'High']].values.tolist()
         ma5_data = [round(x, 3) if not pd.isna(x) else None for x in plot_df['MA5']]
         ma20_data = [round(x, 3) if not pd.isna(x) else None for x in plot_df['MA20']]
         
-        kline = Kline(init_opts=opts.InitOpts(bg_color="#131722"))
+        # 准备成交量数据，赋予颜色属性
+        vol_data = []
+        for i, row in plot_df.iterrows():
+            color = "#089981" if row['Close'] >= row['Open'] else "#f23645"
+            vol_data.append(
+                opts.BarItem(
+                    name=i.strftime('%Y-%m-%d'),
+                    value=int(row['Volume']),
+                    itemstyle_opts=opts.ItemStyleOpts(color=color)
+                )
+            )
+
+        # ========= 主图 K线 =========
+        kline = Kline()
         kline.add_xaxis(x_data)
         kline.add_yaxis(
             "上证50ETF",
@@ -215,8 +229,9 @@ def render_kline_with_bsadf(df: pd.DataFrame, bsadf_result: dict):
             xaxis_opts=opts.AxisOpts(
                 is_scale=True, 
                 splitline_opts=opts.SplitLineOpts(is_show=True, linestyle_opts=opts.LineStyleOpts(color="#2a2e39")),
-                axislabel_opts=opts.LabelOpts(color="#787b86"),
-                axisline_opts=opts.LineStyleOpts(color="#2a2e39")
+                axislabel_opts=opts.LabelOpts(is_show=False), # 主图隐藏X轴标签，留给副图
+                axisline_opts=opts.LineStyleOpts(color="#2a2e39"),
+                axispointer_opts=opts.AxisPointerOpts(is_show=True, type_="line")
             ),
             yaxis_opts=opts.AxisOpts(
                 is_scale=True, 
@@ -226,15 +241,21 @@ def render_kline_with_bsadf(df: pd.DataFrame, bsadf_result: dict):
                 position="right"
             ),
             datazoom_opts=[
-                opts.DataZoomOpts(is_show=False, type_="inside", xaxis_index=[0]),
-                opts.DataZoomOpts(is_show=True, type_="slider", xaxis_index=[0], bottom="0px")
+                opts.DataZoomOpts(is_show=False, type_="inside", xaxis_index=[0, 1]),
+                opts.DataZoomOpts(is_show=True, type_="slider", xaxis_index=[0, 1], bottom="0px",
+                                  data_background_opts=opts.DataZoomBackgroundOpts(
+                                      lineStyle=opts.LineStyleOpts(color="#2962ff"),
+                                      areaStyle=opts.AreaStyleOpts(color="rgba(41,98,255,0.2)")
+                                  ),
+                                  filler_color="rgba(41,98,255,0.1)",
+                                  border_color="#2a2e39")
             ],
             tooltip_opts=opts.TooltipOpts(
                 trigger="axis",
                 axis_pointer_type="cross",
                 background_color="#1e222d",
                 border_color="#2a2e39",
-                textstyle_opts=opts.TextStyleOpts(color="#d1d4dc")
+                textstyle_opts=opts.TextStyleOpts(color="#d1d4dc"),
             ),
             legend_opts=opts.LegendOpts(is_show=False)
         )
@@ -251,7 +272,6 @@ def render_kline_with_bsadf(df: pd.DataFrame, bsadf_result: dict):
             bsadf_sr = bsadf_result['series']
             cv = bsadf_result.get('cv', 1.5)
             scatter_data = []
-            
             for time_str in x_data:
                 time_dt = pd.to_datetime(time_str)
                 if time_dt in bsadf_sr.index:
@@ -275,9 +295,44 @@ def render_kline_with_bsadf(df: pd.DataFrame, bsadf_result: dict):
                 label_opts=opts.LabelOpts(is_show=False)
             )
             kline.overlap(scatter)
-            
-        return kline
+
+        # ========= 副图 成交量 =========
+        bar = Bar()
+        bar.add_xaxis(x_data)
+        bar.add_yaxis(
+            "成交量",
+            vol_data,
+            label_opts=opts.LabelOpts(is_show=False),
+            itemstyle_opts=opts.ItemStyleOpts(color="#58a6ff")
+        )
+        bar.set_global_opts(
+            xaxis_opts=opts.AxisOpts(
+                type_="category",
+                grid_index=1,
+                axislabel_opts=opts.LabelOpts(color="#787b86"),
+                axisline_opts=opts.LineStyleOpts(color="#2a2e39")
+            ),
+            yaxis_opts=opts.AxisOpts(
+                is_scale=True,
+                splitline_opts=opts.SplitLineOpts(is_show=False),
+                axislabel_opts=opts.LabelOpts(is_show=False),
+                axisline_opts=opts.LineStyleOpts(color="#2a2e39"),
+                position="right"
+            ),
+            legend_opts=opts.LegendOpts(is_show=False),
+        )
+
+        # ========= 组合 Grid =========
+        grid_chart = Grid(init_opts=opts.InitOpts(bg_color="#131722", width="100%", height="600px"))
+        # 主图占 70% 高度
+        grid_chart.add(kline, grid_opts=opts.GridOpts(pos_left="3%", pos_right="8%", height="60%"))
+        # 副图占 20% 高度
+        grid_chart.add(bar, grid_opts=opts.GridOpts(pos_left="3%", pos_right="8%", pos_top="75%", height="20%"))
+
+        return grid_chart
     except Exception as e:
+        import traceback
+        print(traceback.format_exc())
         return None
 
 # ==================== 主程序 ====================
@@ -382,10 +437,11 @@ if df_etf is not None and not df_etf.empty:
     st.markdown("<hr style='border-top: 1px solid var(--tv-border); margin: 25px 0;'>", unsafe_allow_html=True)
     
     # ========= 高阶图表 =========
-    st.markdown("<h4 style='color:#d1d4dc; font-size:1.1rem; font-weight:500;'>BSADF 极值测试波动矩阵图</h4>", unsafe_allow_html=True)
+    st.markdown("<h4 style='color:#d1d4dc; font-size:1.1rem; font-weight:500;'>BSADF 极值测试量价矩阵</h4>", unsafe_allow_html=True)
     kline_chart = render_kline_with_bsadf(df_etf, bsadf_result)
     if kline_chart:
-        st_pyecharts(kline_chart, height="480px")
+        # Pyecharts Grid 高度定高，防止被压扁
+        st_pyecharts(kline_chart, height="600px")
         
     st.markdown("<hr style='border-top: 1px solid var(--tv-border); margin: 25px 0;'>", unsafe_allow_html=True)
     
@@ -394,38 +450,72 @@ if df_etf is not None and not df_etf.empty:
     
     if options_df is not None and not options_df.empty:
         try:
-            # 安全提取可用列，防范 akshare 字段变更 (如无 '隐含波动率')
-            cols_to_extract = ['代码', '名称', '最新价', '行权价']
-            if '隐含波动率' in options_df.columns:
-                cols_to_extract.append('隐含波动率')
+            # 扩展提取流动性指标列
+            desired_cols = ['代码', '名称', '最新价', '行权价', '涨跌幅', '成交量', '持仓量', '隐含波动率']
+            cols_to_extract = [c for c in desired_cols if c in options_df.columns]
                 
             show_df = options_df[cols_to_extract].copy()
             show_df['行权价'] = pd.to_numeric(show_df['行权价'], errors='coerce')
-            show_df['当前虚值空间(%)'] = (abs(spot - show_df['行权价']) / spot * 100).round(2)
+            show_df['最新价'] = pd.to_numeric(show_df['最新价'], errors='coerce')
             
-            # 使用GARCH VaR计算它的安全防线
+            # 计算虚值空间
+            show_df['当前虚值空间(%)'] = (abs(spot - show_df['行权价']) / spot * 100).round(2)
             show_df['距止损线缓冲(%)'] = (show_df['当前虚值空间(%)'] - var_95).round(2)
             
-            # 高亮优选：OTM大于目标值，且距离认怂线有2%以上的缓冲
+            # 处理 NaN: 统一填补并降级数据类型，防止格式化崩溃
+            show_df = show_df.fillna(0)
+            
+            # 强化列重排
+            front_cols = ['代码', '名称', '行权价', '最新价', '当前虚值空间(%)', '距止损线缓冲(%)']
+            back_cols = [c for c in show_df.columns if c not in front_cols]
+            show_df = show_df[front_cols + back_cols]
+            
+            # 排序后应用高级Pandas Styler
+            show_df = show_df[show_df['行权价'] > 0].sort_values('当前虚值空间(%)', ascending=False)
+            
+            # Styler定义
+            format_dict = {
+                '最新价': '{:.4f}',
+                '行权价': '{:.3f}',
+                '当前虚值空间(%)': '{:.2f}%',
+                '距止损线缓冲(%)': '{:.2f}%'
+            }
+            if '隐含波动率' in show_df.columns:
+                format_dict['隐含波动率'] = '{:.2f}'
+            if '涨跌幅' in show_df.columns:
+                format_dict['涨跌幅'] = '{:.2f}%'
+                
             def highlight_target(row):
                 if row['当前虚值空间(%)'] >= otm and row['距止损线缓冲(%)'] > 2.0:
                     return ['background-color: rgba(8, 153, 129, 0.2); color: #089981; font-weight: bold'] * len(row)
                 elif row['当前虚值空间(%)'] < stop_loss:
-                    return ['color: #f23645'] * len(row)
+                    return ['color: #f23645; opacity: 0.8'] * len(row)
                 return [''] * len(row)
             
-            # 排序后展示
-            show_df = show_df.dropna(subset=['行权价']).sort_values('当前虚值空间(%)', ascending=False)
-            st.dataframe(show_df.style.apply(highlight_target, axis=1), height=400, use_container_width=True)
+            styled_df = (show_df.style
+                .apply(highlight_target, axis=1)
+                .format(format_dict, na_rep='-')
+                .set_properties(**{
+                    'text-align': 'center', 
+                    'border-color': 'var(--tv-border)',
+                })
+                .set_table_styles([
+                    {'selector': 'th', 'props': [('background-color', 'var(--tv-panel)'), ('color', 'var(--tv-text-dim)'), ('font-weight', '500'), ('border-bottom', '1px solid var(--tv-border)')]},
+                    {'selector': 'td', 'props': [('border-bottom', '1px solid var(--tv-border)')]}
+                ])
+            )
             
-            st.markdown("<div style='font-size:0.8rem; color:var(--tv-text-dim); margin-top:5px;'>说明: 绿色底纹标识缓冲极高之重点关注安全合约，红色字体警示已击穿 VaR 止损红线的标的。</div>", unsafe_allow_html=True)
+            st.dataframe(styled_df, height=450, use_container_width=True, hide_index=True)
+            
+            st.markdown("<div style='font-size:0.85rem; color:var(--tv-text-dim); margin-top:8px;'><b>安全边界图例</b>: <span style='color:#089981; font-weight:bold;'>■</span> 绿色底纹代表充足安全垫的精选目标，<span style='color:#f23645; font-weight:bold;'>■</span> 红色字体警告虚值过浅极易惨遭击穿。"
+                        "<br/><b>流动性提示</b>: 查看右侧成交量与持仓量，避免买卖滑点过大的真空合约。</div>", unsafe_allow_html=True)
         except Exception as e:
-            st.error(f"解析期权链失败: {e}")
+            st.error(f"解析期权结构发生异常: {e}")
             st.dataframe(options_df)
     else:
-        st.warning("数据接口未能返回期权列表，可能处于交易时段外或接口限制。")
+        st.warning("数据接口未能返回期权组合表列，可能处于交易时段外或接口连接阻断。")
 
 else:
-    st.error("无法加载 510050.SS (上证50ETF) 底层价格轨迹，请检查本地网络链路或远程数据节点状态。")
+    st.error("无法加载 510050.SS (上证50ETF) 底层基准价格轨迹，请检查本地网络链路或远程节点状态。")
 
 st.markdown(f"<div style='text-align:right; color:var(--tv-text-dim); margin-top:20px; font-size: 0.75rem;'>数据引擎链路: yfinance + akshare | {source_etf} | {opt_source} | 强持久化缓存激活</div>", unsafe_allow_html=True)
