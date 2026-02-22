@@ -24,23 +24,26 @@ from strategy.indicators import StrategyIndicators
 PUSHPLUS_TOKEN = "3660eb1e0b364a78b3beed2f349b29f8"
 
 st.set_page_config(
-    page_title="上证50期权高阶看板",
-    page_icon="📈",
+    page_title="上证50期权高频防御系统",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 st.markdown("""
 <style>
-    .main-title { font-size: 2.2rem; font-weight: 800; color: #1f77b4; margin-bottom: -10px;}
-    .sub-title { font-size: 1.0rem; color: #888; margin-bottom: 20px;}
-    .warning { padding: 1rem; background: #2a2a3e; border-left: 4px solid #f9a825; border-radius: 4px;}
-    .metric-card { background: #1e1e2d; padding: 15px; border-radius: 10px; border: 1px solid #333; text-align: center;}
-    .metric-title { font-size: 0.9rem; color: #aaa; margin-bottom: 5px;}
-    .metric-value { font-size: 1.5rem; font-weight: bold; color: #fff;}
-    .metric-sub { font-size: 0.8rem; }
-    .color-green { color: #00cc96; }
-    .color-red { color: #ff4d4f; }
+    body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; background-color: #0e1117; color: #e0e0e0; }
+    .main-title { font-size: 1.8rem; font-weight: 600; color: #ffffff; margin-bottom: 2px; letter-spacing: 0.5px;}
+    .sub-title { font-size: 0.9rem; color: #8b92a5; margin-bottom: 24px; letter-spacing: 0.2px;}
+    .metric-card { background: #161b22; padding: 18px; border-radius: 4px; border: 1px solid #30363d; text-align: left; box-shadow: 0 1px 3px rgba(0,0,0,0.12);}
+    .metric-title { font-size: 0.85rem; color: #8b92a5; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px;}
+    .metric-value { font-size: 1.6rem; font-weight: 500; color: #ffffff; letter-spacing: 0.2px;}
+    .metric-sub { font-size: 0.75rem; color: #8b92a5; margin-top: 4px;}
+    .color-green { color: #3fb950; }
+    .color-red { color: #f85149; }
+    .color-blue { color: #58a6ff; }
+    .color-orange { color: #d29922; }
+    .stDataFrame { font-size: 0.85rem; }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -210,23 +213,23 @@ with st.sidebar:
     rv_threshold = st.slider("RV年化异常阈值(%)", 15, 60, 30)
     
     st.markdown("---")
-    push = st.checkbox("PushPlus 信号推送", value=False)
+    push = st.checkbox("PushPlus 推送服务", value=False)
     if push:
-        st.info("已启用实盘级推送")
+        st.info("推送通道已激活")
         
     st.markdown("---")
-    st.subheader("数据管理")
-    force_refresh = st.button("🔄 强制更新所有数据源", use_container_width=True)
+    st.subheader("系统控制")
+    force_refresh = st.button("强制更新数据总线", use_container_width=True)
 
-st.markdown('<div class="main-title">上证50ETF期权 卖方高阶看板 (v4.1)</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">系统核心: 多重GARCH立体防御体系 | BSADF极值泡沫猎杀 | 日内RV高频止损截断</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">上证50ETF期权 机构级防御风控面板 (v4.1)</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">算法核心: 三重GARCH VaR预测 | BSADF左偏序列极值监控 | 日频实时RV熔断体系</div>', unsafe_allow_html=True)
 
 # 获取数据
 df_etf, source_etf = get_etf_510050(force_refresh=force_refresh)
 options_df, opt_source = get_options_data(force_refresh=force_refresh)
 
 if force_refresh:
-    st.toast("数据源已向云端发起更新请求", icon="✅")
+    st.toast("数据总线更新指令已发送", icon="🔄")
 
 if df_etf is not None and not df_etf.empty:
     prices = df_etf['Close']
@@ -254,93 +257,97 @@ if df_etf is not None and not df_etf.empty:
     
     # 产生信号
     if triggered:
-        signal, action = "建仓信号启动", f"优先卖出 {var_99:.1f}% 到 {otm:.1f}% 深度虚值的 Put/Call 期权"
-        sig_color = "#f9a825"
+        signal, action = "执行: 建立空仓", f"指令: 卖出偏离 {var_99:.1f}% 至 {otm:.1f}% 之虚值合约"
+        sig_color = "color-orange"
     else:
-        signal, action = "绝对观望", f"BSADF={bsadf_stat:.2f} 尚未进入非理性极值区间，忍耐吃瓜。"
-        sig_color = "#333"
+        signal, action = "状态: 观望戒备", f"BSADF({bsadf_stat:.2f}) 未达显著极值区间"
+        sig_color = ""
 
     # ========= 核心数据面板 =========
-    st.markdown("### 📊 实时量化防御面")
+    st.markdown("<h4 style='color:#8b92a5; font-size:1rem; font-weight:500; margin-top:10px;'>量化引擎参数</h4>", unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
     
     with c1:
-        color = "color-red" if change > 0 else "color-green"
+        color = "color-red" if change < 0 else "color-green"
         st.markdown(f"""
         <div class="metric-card">
             <div class="metric-title">510050.SS (底层标的)</div>
             <div class="metric-value {color}">{spot:.3f}</div>
-            <div class="metric-sub {color}">{change:+.2f}%</div>
+            <div class="metric-sub">今日涨跌: <span class="{color}">{change:+.2f}%</span></div>
         </div>
         """, unsafe_allow_html=True)
     with c2:
         st.markdown(f"""
         <div class="metric-card">
-            <div class="metric-title">多重GARCH 预测年化波动率</div>
-            <div class="metric-value" style="color:#00e5ff">{sigma:.2f}%</div>
-            <div class="metric-sub">Sigma T+1 期望</div>
+            <div class="metric-title">GARCH T+1 年化预测</div>
+            <div class="metric-value color-blue">{sigma:.2f}%</div>
+            <div class="metric-sub">复合模型次日方差逼近值</div>
         </div>
         """, unsafe_allow_html=True)
     with c3:
         st.markdown(f"""
         <div class="metric-card">
-            <div class="metric-title">认怂绝对红线 (VaR 95%)</div>
-            <div class="metric-value" style="color:#ff6b6b">±{var_95:.2f}%</div>
-            <div class="metric-sub">如所持仓头寸剩余虚值率 < 该数值, 无条件平仓!</div>
+            <div class="metric-title">VaR 95% 刚性离场带</div>
+            <div class="metric-value color-red">±{var_95:.2f}%</div>
+            <div class="metric-sub">期权剩余虚值空间低于此阈值立即平仓</div>
         </div>
         """, unsafe_allow_html=True)
     with c4:
         st.markdown(f"""
         <div class="metric-card">
-            <div class="metric-title">系统操作指令</div>
-            <div class="metric-value" style="font-size: 1.2rem; color:{sig_color}">{signal}</div>
+            <div class="metric-title">系统交易指令</div>
+            <div class="metric-value {sig_color}" style="font-size: 1.1rem;">{signal}</div>
             <div class="metric-sub">{action}</div>
         </div>
         """, unsafe_allow_html=True)
         
-    st.markdown("---")
+    st.markdown("<hr style='border-top: 1px solid #30363d; margin: 25px 0;'>", unsafe_allow_html=True)
     
     # ========= 高阶图表 =========
-    st.markdown("### 📉 K线与气泡预警诊断")
+    st.markdown("<h4 style='color:#8b92a5; font-size:1rem; font-weight:500;'>BSADF 价格泡沫预警图</h4>", unsafe_allow_html=True)
     kline_chart = render_kline_with_bsadf(df_etf, bsadf_result)
     if kline_chart:
-        st_pyecharts(kline_chart, height="450px")
+        st_pyecharts(kline_chart, height="380px")
         
-    st.markdown("---")
+    st.markdown("<hr style='border-top: 1px solid #30363d; margin: 25px 0;'>", unsafe_allow_html=True)
     
     # ========= 期权链交易推荐 =========
-    st.markdown("### 🎯 实时期权靶心测算库 (寻找最佳深度虚值)")
+    st.markdown("<h4 style='color:#8b92a5; font-size:1rem; font-weight:500;'>期权深度虚值策略标的池</h4>", unsafe_allow_html=True)
     
     if options_df is not None and not options_df.empty:
-        # 重命名容易理解的列并计算虚值率
         try:
-            show_df = options_df[['代码', '名称', '最新价', '行权价', '隐含波动率']].copy()
+            # 安全提取可用列，防范 akshare 字段变更 (如无 '隐含波动率')
+            cols_to_extract = ['代码', '名称', '最新价', '行权价']
+            if '隐含波动率' in options_df.columns:
+                cols_to_extract.append('隐含波动率')
+                
+            show_df = options_df[cols_to_extract].copy()
             show_df['行权价'] = pd.to_numeric(show_df['行权价'], errors='coerce')
-            show_df['当前虚值深度(%)'] = (abs(spot - show_df['行权价']) / spot * 100).round(2)
+            show_df['当前虚值空间(%)'] = (abs(spot - show_df['行权价']) / spot * 100).round(2)
             
             # 使用GARCH VaR计算它的安全防线
-            show_df['距离95%认怂线差距'] = (show_df['当前虚值深度(%)'] - var_95).round(2)
+            show_df['距止损线缓冲(%)'] = (show_df['当前虚值空间(%)'] - var_95).round(2)
             
-            # 高亮优选：OTM大于11%，同时隐含波动率较高
+            # 高亮优选：OTM大于目标值，且距离认怂线有2%以上的缓冲
             def highlight_target(row):
-                if row['当前虚值深度(%)'] >= otm and row['距离95%认怂线差距'] > 2.0:
-                    return ['background-color: #2e4c2e'] * len(row)
-                elif row['当前虚值深度(%)'] < stop_loss:
-                    return ['color: #ff4d4f'] * len(row)
+                if row['当前虚值空间(%)'] >= otm and row['距止损线缓冲(%)'] > 2.0:
+                    return ['background-color: rgba(63, 185, 80, 0.15)'] * len(row)
+                elif row['当前虚值空间(%)'] < stop_loss:
+                    return ['color: #f85149'] * len(row)
                 return [''] * len(row)
             
             # 排序后展示
-            show_df = show_df.sort_values('当前虚值深度(%)', ascending=False)
+            show_df = show_df.dropna(subset=['行权价']).sort_values('当前虚值空间(%)', ascending=False)
             st.dataframe(show_df.style.apply(highlight_target, axis=1), height=400, use_container_width=True)
             
-            st.caption("🟢 绿色背景代表符合安全垫条件(离认怂线距离远)的高优Target | 🔴 红色字体代表已被击穿至止损区间的剧毒合约")
+            st.markdown("<div style='font-size:0.8rem; color:#8b92a5; margin-top:5px;'>说明: 绿色底纹标识缓冲极高之优选标的，红色字体警示已击破止损阈值之危急合约。</div>", unsafe_allow_html=True)
         except Exception as e:
-            st.warning(f"期权表单渲染错误: {e}")
+            st.error(f"解析期权链失败: {e}")
             st.dataframe(options_df)
     else:
-        st.warning("⚠️ 盘口休市或数据接口异常，当前无法加载期权靶心测算。")
+        st.warning("数据接口未能返回期权列表，交易时段外或接口限制。")
 
 else:
-    st.error("❌ 无法获取 510050.SS 基础现价数据。请检查网络。")
+    st.error("无法加载 510050.SS (上证50ETF) 底层价格数据，请检查网络链路或数据节点状态。")
 
-st.markdown(f"<div style='text-align:center; color:#555; margin-top:30px; font-size: 0.8rem;'>数据驱动引擎: yfinance + akshare | {source_etf} | {opt_source} | 刷新策略: 磁盘持久化智能缓存机制</div>", unsafe_allow_html=True)
+st.markdown(f"<div style='text-align:right; color:#8b92a5; margin-top:20px; font-size: 0.75rem;'>数据引擎链路: yfinance + akshare | {source_etf} | {opt_source} | 强持久化缓存激活</div>", unsafe_allow_html=True)
