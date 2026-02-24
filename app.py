@@ -157,12 +157,8 @@ def load_local_cache(filename: str, is_timeseries: bool = False):
     try:
         if is_timeseries:
             df = pd.read_csv(filepath, index_col=0, parse_dates=True)
-            # ── 修正 yfinance MultiIndex 列名 ─────────────────
-            # yfinance >= 0.2 有时以 ('Close', '510050.SS') 形式保存列名
             new_cols = {}
             for c in df.columns:
-                name = c[0] if isinstance(c, tuple) else str(c)
-                # 去掉括号等冗余字符
                 name = str(c).strip("()'\"").split(",")[0].strip().strip("'")
                 new_cols[c] = name
             df.rename(columns=new_cols, inplace=True)
@@ -186,33 +182,93 @@ def is_cache_expired(filename: str, ttl_seconds: int) -> bool:
     return (time.time() - os.path.getmtime(filepath)) > ttl_seconds
 
 # ══════════════════════════════════════════════════════
-# 数据获取 — ETF 日线 (SWR, 12h TTL)
+# 数据获取 — ETF 日线
+#   策略: 优先读本地 CSV -> 若无则同步拉取 (含重试)
+#         若有则后台异步刷新 (SWR)
+#   st.cache_data 保证 Cloud 重启后内存仍有数据
 # ══════════════════════════════════════════════════════
+def _fetch_etf_sync():
+    """同步拉取 ETF 数据 (阻塞, 用于首次冷启动)"""
+    import yfinance as yf
+    for attempt in range(3):
+        try:
+            df = yf.download("510050.SS", period="5y", progress=False)
+            if df is not None and not df.empty:
+                df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+                save_local_cache(df, "etf_510050.csv")
+                logger.info(f"ETF sync fetch OK: {len(df)} rows (attempt {attempt+1})")
+                return df
+        except Exception as e:
+            logger.warning(f"ETF sync fetch attempt {attempt+1}/3 failed: {e}")
+            time.sleep(2)
+    return None
+
 def _fetch_etf_bg():
+    """后台异步刷新 (SWR, 仅在已有缓存时使用)"""
     if not _ETF_LOCK.acquire(blocking=False):
         return
     try:
         import yfinance as yf
         df = yf.download("510050.SS", period="5y", progress=False)
-        if not df.empty:
+        if df is not None and not df.empty:
             df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
             save_local_cache(df, "etf_510050.csv")
-            logger.info("ETF cache refreshed")
+            logger.info("ETF background refresh OK")
     except Exception as e:
-        logger.warning(f"ETF fetch failed: {e}")
+        logger.warning(f"ETF bg fetch failed: {e}")
     finally:
         _ETF_LOCK.release()
 
+@st.cache_data(ttl=43200, show_spinner="Loading ETF data...")
+def _cached_etf_fetch():
+    """st.cache_data 层: Cloud 内存缓存 12h, 防止重部署后数据丢失"""
+    df = load_local_cache("etf_510050.csv", is_timeseries=True)
+    if df is not None:
+        return df
+    return _fetch_etf_sync()
+
 def get_etf_510050(force_refresh: bool = False):
+    # 第一层: st.cache_data 内存缓存 (Cloud 友好)
+    df = _cached_etf_fetch()
+
+    # 第二层: 本地文件可能更新, 检查磁盘
+    local_df = load_local_cache("etf_510050.csv", is_timeseries=True)
+    if local_df is not None and len(local_df) > (len(df) if df is not None else 0):
+        df = local_df
+
+    # 第三层: SWR 后台静默刷新
     if force_refresh or is_cache_expired("etf_510050.csv", 43200):
         threading.Thread(target=_fetch_etf_bg, daemon=True).start()
-    df = load_local_cache("etf_510050.csv", is_timeseries=True)
-    return (df, "本地急速库") if df is not None else (None, "待缓冲")
+
+    if df is not None and not df.empty:
+        return (df, "loaded")
+    return (None, "no data")
 
 # ══════════════════════════════════════════════════════
-# 数据获取 — 期权盘口 (SWR, 60s TTL)
+# 数据获取 — 期权盘口
+#   同理: 首次同步拉取, 后续 SWR 后台刷新
 # ══════════════════════════════════════════════════════
+def _fetch_options_sync():
+    """同步拉取期权数据 (阻塞, 用于首次冷启动)"""
+    import akshare as ak
+    for attempt in range(3):
+        try:
+            df_full = ak.option_current_em()
+            if df_full is not None and not df_full.empty:
+                mask = df_full['名称'].str.contains('50ETF', na=False) | \
+                       df_full['代码'].str.startswith('100', na=False)
+                df_50 = df_full[mask].copy()
+                if not df_50.empty:
+                    save_local_cache(df_50, "options_50.csv")
+                    logger.info(f"Options sync fetch OK: {len(df_50)} contracts (attempt {attempt+1})")
+                    return df_50
+        except Exception as e:
+            logger.warning(f"Options sync fetch attempt {attempt+1}/3 failed: {e}")
+            time.sleep(2)
+    return None
+
 def _fetch_options_bg():
+    """后台异步刷新 (SWR)"""
     if not _OPT_LOCK.acquire(blocking=False):
         return
     try:
@@ -224,17 +280,33 @@ def _fetch_options_bg():
             df_50 = df_full[mask].copy()
             if not df_50.empty:
                 save_local_cache(df_50, "options_50.csv")
-                logger.info(f"Options cache refreshed: {len(df_50)} contracts")
+                logger.info(f"Options bg refresh OK: {len(df_50)} contracts")
     except Exception as e:
-        logger.warning(f"Options fetch failed: {e}")
+        logger.warning(f"Options bg fetch failed: {e}")
     finally:
         _OPT_LOCK.release()
 
+@st.cache_data(ttl=120, show_spinner="Loading options data...")
+def _cached_options_fetch():
+    """st.cache_data 层: Cloud 内存缓存 2min"""
+    df = load_local_cache("options_50.csv")
+    if df is not None:
+        return df
+    return _fetch_options_sync()
+
 def get_options_data(force_refresh: bool = False):
+    df = _cached_options_fetch()
+
+    local_df = load_local_cache("options_50.csv")
+    if local_df is not None and len(local_df) > (len(df) if df is not None else 0):
+        df = local_df
+
     if force_refresh or is_cache_expired("options_50.csv", 60):
         threading.Thread(target=_fetch_options_bg, daemon=True).start()
-    df = load_local_cache("options_50.csv")
-    return (df, "后台SWR推流") if df is not None else (None, "待缓冲")
+
+    if df is not None and not df.empty:
+        return (df, "loaded")
+    return (None, "no data")
 
 # ══════════════════════════════════════════════════════
 # 缓存的重计算函数 — GARCH (TTL 1h)
