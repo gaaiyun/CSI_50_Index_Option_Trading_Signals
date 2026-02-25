@@ -124,11 +124,7 @@ st.markdown("""
     /* Section divider */
     .section-divider { border-top: 1px solid var(--tv-border); margin: 22px 0; }
 
-    /* Streamlit chrome — hide default header bar and footer */
-    #MainMenu { visibility: hidden; }
-    footer { visibility: hidden; }
-    [data-testid="stHeader"] { background-color: transparent !important; border-bottom: none !important; }
-    [data-testid="stToolbar"] { visibility: hidden !important; }
+    /* Streamlit chrome adjustments */
     section[data-testid="stSidebar"] > div:first-child { padding-top: 0; }
 </style>
 """, unsafe_allow_html=True)
@@ -315,7 +311,7 @@ def get_options_data(force_refresh: bool = False):
 def _cached_garch(prices_tuple: tuple) -> dict:
     prices = pd.Series(prices_tuple)
     ind = StrategyIndicators()
-    return ind.calculate_garch_var(prices, confidence_levels=[0.90, 0.95, 0.99])
+    return ind.calculate_garch_var(prices, confidence_levels=[0.95, 0.975, 0.99])
 
 @st.cache_data(ttl=900, show_spinner=False)
 def _cached_bsadf(prices_tuple: tuple) -> dict:
@@ -669,6 +665,10 @@ sigma_ann = garch_result.get('sigma_norm', 0.01) * np.sqrt(252) * 100
 # HV30
 hv30_val = float(returns.iloc[-30:].std() * np.sqrt(252) * 100) if len(returns) >= 30 else 0.0
 
+# Extract new R-style metrics
+robust_vol = garch_result.get('robust_vol', 0.01) * np.sqrt(252) * 100
+lambda_60 = garch_result.get('jump_lambda_60', 0.0) * 100
+
 # 信号生成
 if triggered:
     signal    = "执行: 建立空仓"
@@ -692,7 +692,7 @@ with c1:
     <div class="metric-card {bc}">
         <div class="metric-title">510050.SS (底层标的)</div>
         <div class="metric-value {cc}">{spot:.3f}</div>
-        <div class="metric-sub">今日波动: <span class="{cc}">{change_pct:+.2f}%</span></div>
+        <div class="metric-sub">波动: <span class="{cc}">{change_pct:+.2f}%</span> | 异常跳跃率(λ): {lambda_60:.1f}%</div>
     </div>""", unsafe_allow_html=True)
 
 with c2:
@@ -707,7 +707,7 @@ with c2:
     <div class="metric-card card-blue">
         <div class="metric-title">HV30 / Avg IV</div>
         <div class="metric-value color-blue">{hv30_val:.1f}% / {iv_val:.1f}%</div>
-        <div class="metric-sub">{hv_gt_iv} | GARCH σ≈{sigma_ann:.1f}%</div>
+        <div class="metric-sub">{hv_gt_iv} | 稳健GARCH σ≈{robust_vol:.1f}%</div>
     </div>""", unsafe_allow_html=True)
 
 with c3:

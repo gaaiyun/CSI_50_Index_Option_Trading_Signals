@@ -117,6 +117,25 @@ class StrategyIndicators:
             results = {}
 
             # ════════════════════════════════════════════════════════
+            # 全新优化: 引入 R 代码中的鲁棒波动率与跳跃频率 (λ)
+            # ════════════════════════════════════════════════════════
+            # 1. 稳健波动率 (剔除 1%和99% 异常值后的 SD), 防止 GARCH 预估被极值过度干扰
+            lower_q = float(np.percentile(recent_returns, 1))
+            upper_q = float(np.percentile(recent_returns, 99))
+            filtered_rets = recent_returns[(recent_returns >= lower_q) & (recent_returns <= upper_q)]
+            robust_sd = float(np.std(filtered_rets))
+            results['robust_vol'] = robust_sd
+            
+            # 2. 60天跳跃频率 λ (过去60天内, 绝对涨跌幅超过 99% 分位数的频率)
+            # 使用类似于 R 代码中的 rolling(60).mean()
+            vol_threshold = abs(stats.norm.ppf(0.01)) * robust_sd  # 约 2.33 * robust_sd
+            jumps = (np.abs(recent_returns) > vol_threshold).astype(int)
+            lambda_60 = float(jumps.rolling(window=min(60, len(jumps))).mean().iloc[-1])
+            results['jump_lambda_60'] = lambda_60
+            
+            logger.info(f"R-Style Metrics: Robust Vol={robust_sd*250**0.5:.2%}, Jump Lambda(60d)={lambda_60:.2%}")
+
+            # ════════════════════════════════════════════════════════
             # 模型 1: 标准正态 GARCH(1,1)
             # ════════════════════════════════════════════════════════
             try:
@@ -130,9 +149,10 @@ class StrategyIndicators:
                 results['beta_norm'] = float(res_norm.params.get('beta[1]', 0.8))
 
                 for cl in confidence_levels:
+                    cl_str = "975" if cl == 0.975 else str(int(cl*100))
                     z = stats.norm.ppf(cl)          # 双侧: put 用左尾, call 用右尾
-                    results[f'norm_{int(cl*100)}_call'] = float(z * sigma_norm)   # 上行
-                    results[f'norm_{int(cl*100)}_put'] = float(z * sigma_norm)    # 正态对称
+                    results[f'norm_{cl_str}_call'] = float(z * sigma_norm)   # 上行
+                    results[f'norm_{cl_str}_put'] = float(z * sigma_norm)    # 正态对称
 
             except Exception as e:
                 logger.warning(f"Normal GARCH failed: {e}")
@@ -155,6 +175,7 @@ class StrategyIndicators:
                 lam = float(res_skew.params.get('lambda', 0.0))  # 偏度 (-1,1)
 
                 for cl in confidence_levels:
+                    cl_str = "975" if cl == 0.975 else str(int(cl*100))
                     # ─ 下行 (Put 认沽防线): 左尾极值 — 使用 1-cl 最严格
                     q_put_raw = stats.t.ppf(1.0 - cl, df=nu)   # 负值
                     # ─ 上行 (Call 认购防线): 右尾极值
@@ -162,8 +183,8 @@ class StrategyIndicators:
                     # ─ 偏度修正: 偏态 t 右尾比左尾多出 |lam * sigma| 的胖尾
                     skew_adj_put = 1.0 + max(-lam, 0) * 0.3
                     skew_adj_call = 1.0 + max(lam, 0) * 0.3
-                    results[f'skew_{int(cl*100)}_put'] = float(abs(q_put_raw) * sigma_skew * skew_adj_put)
-                    results[f'skew_{int(cl*100)}_call'] = float(q_call_raw * sigma_skew * skew_adj_call)
+                    results[f'skew_{cl_str}_put'] = float(abs(q_put_raw) * sigma_skew * skew_adj_put)
+                    results[f'skew_{cl_str}_call'] = float(q_call_raw * sigma_skew * skew_adj_call)
 
             except Exception as e:
                 logger.warning(f"Skew-t GARCH failed: {e}")
@@ -182,12 +203,14 @@ class StrategyIndicators:
 
             for cl in confidence_levels:
                 import scipy.stats as stats2
+                cl_str = "975" if cl == 0.975 else str(int(cl*100))
                 z = stats2.norm.ppf(cl)
-                results[f'jump_{int(cl*100)}_put'] = float(z * extreme_buf)
-                results[f'jump_{int(cl*100)}_call'] = float(z * extreme_buf)
+                results[f'jump_{cl_str}_put'] = float(z * extreme_buf)
+                results[f'jump_{cl_str}_call'] = float(z * extreme_buf)
 
             # ════════════════════════════════════════════════════════
             # 合并输出: 取三重模型的最宽防线 (最保守)
+            # 输出 1%, 2.5%, 5% 风险分位数 (对应 99%, 97.5%, 95% 置信度)
             # ════════════════════════════════════════════════════════
             def _widest(prefix_list: List[str]) -> float:
                 vals = [results[k] for k in prefix_list if k in results]
@@ -195,6 +218,11 @@ class StrategyIndicators:
 
             results['var_95_put'] = _widest(['skew_95_put', 'jump_95_put', 'norm_95_put'])
             results['var_95_call'] = _widest(['skew_95_call', 'jump_95_call', 'norm_95_call'])
+            
+            # 97.5% 置信度 (2.5% tail)
+            results['var_975_put'] = _widest(['skew_975_put', 'jump_975_put', 'norm_975_put']) 
+            results['var_975_call'] = _widest(['skew_975_call', 'jump_975_call', 'norm_975_call'])
+            
             results['var_99_put'] = _widest(['skew_99_put', 'jump_99_put', 'norm_99_put'])
             results['var_99_call'] = _widest(['skew_99_call', 'jump_99_call', 'norm_99_call'])
 
@@ -207,7 +235,9 @@ class StrategyIndicators:
         except Exception as e:
             logger.error(f"GARCH VaR calculation failed: {e}", exc_info=True)
             return {'error': str(e), 'var_95': 0.02, 'var_99': 0.03,
-                    'var_95_put': 0.02, 'var_95_call': 0.02}
+                    'var_95_put': 0.02, 'var_95_call': 0.02, 
+                    'var_975_put': 0.025, 'var_975_call': 0.025,
+                    'robust_vol': 0.02, 'jump_lambda_60': 0.0}
 
     def calculate_daily_rv(
         self,
