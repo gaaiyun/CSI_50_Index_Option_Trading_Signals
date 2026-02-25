@@ -11,6 +11,8 @@ VolGuard Pro — 上证50ETF期权全景风控系统 (v6.0)
 """
 
 import os
+# 强制隔离本应用的 HTTP 代理，防止 TUN 模式/代理分流规则断开 akshare 和 yfinance 的数据请求连接
+os.environ["NO_PROXY"] = "*"
 import time
 import logging
 import threading
@@ -246,6 +248,9 @@ def get_etf_510050(force_refresh: bool = False):
 # ══════════════════════════════════════════════════════
 def _fetch_options_sync():
     """同步拉取期权数据 (阻塞, 用于首次冷启动)"""
+    import os
+    # 强制 requests 绕过本地系统代理 (避免 Clash/V2ray TUN 模式阻断 EastMoney)
+    os.environ["NO_PROXY"] = "*"
     import akshare as ak
     last_error = None
     for attempt in range(3):
@@ -270,6 +275,8 @@ def _fetch_options_bg():
     if not _OPT_LOCK.acquire(blocking=False):
         return
     try:
+        import os
+        os.environ["NO_PROXY"] = "*"
         import akshare as ak
         df_full = ak.option_current_em()
         if df_full is not None and not df_full.empty:
