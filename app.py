@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VolGuard Pro — 上证50ETF期权全景风控系统 (v6.0)
+VolGuard Pro — 上证50ETF期权全景风控系统 (v6.1)
 
 架构:
-  - 数据层: yfinance (ETF) + akshare (期权链), Stale-While-Revalidate 异步缓存
+  - 数据层: yfinance (ETF) + 新浪财经/akshare (期权链), SWR 异步缓存
   - 算法层: BSADF 泡沫测试 (PSY 2015) + Multi-Dist GARCH VaR (双向防线) + RV
   - 视图层: ECharts 4-Pane Grid (K线+布林带 / BSADF / Volume+MA / HV vs IV)
   - 安全层: Token 通过 st.secrets / 环境变量注入, 不得硬编码
+
+v6.1 变更:
+  - 期权数据源切换为新浪财经 (hq.sinajs.cn), 解决 Streamlit Cloud 海外 IP 无法访问东方财富的问题
+  - akshare 降级为可选 fallback, 不再是必须依赖
 """
 
 import os
@@ -25,6 +29,7 @@ from pyecharts import options as opts
 from pyecharts.charts import Kline, Line, Grid, Bar
 
 from strategy.indicators import StrategyIndicators
+from data_sources import fetch_50etf_options_sina
 
 # ══════════════════════════════════════════════════════
 # 日志配置
@@ -139,11 +144,12 @@ DATA_DIR = os.path.join(_SCRIPT_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # ══════════════════════════════════════════════════════
-# 并发控制 — Semaphore 防止线程爆炸
+# 并发控制 — Semaphore 防止线程爆炸, Lock 保护 CSV 读写
 # ══════════════════════════════════════════════════════
 _ETF_LOCK = threading.Semaphore(1)
 _OPT_LOCK = threading.Semaphore(1)
 _BSADF_LOCK = threading.Semaphore(1)
+_CSV_LOCK = threading.Lock()
 
 # ══════════════════════════════════════════════════════
 # SWR 缓存工具函数
@@ -153,15 +159,16 @@ def load_local_cache(filename: str, is_timeseries: bool = False):
     if not os.path.exists(filepath):
         return None
     try:
-        if is_timeseries:
-            df = pd.read_csv(filepath, index_col=0, parse_dates=True)
-            new_cols = {}
-            for c in df.columns:
-                name = str(c).strip("()'\"").split(",")[0].strip().strip("'")
-                new_cols[c] = name
-            df.rename(columns=new_cols, inplace=True)
-            return df
-        return pd.read_csv(filepath)
+        with _CSV_LOCK:
+            if is_timeseries:
+                df = pd.read_csv(filepath, index_col=0, parse_dates=True)
+                new_cols = {}
+                for c in df.columns:
+                    name = str(c).strip("()'\"").split(",")[0].strip().strip("'")
+                    new_cols[c] = name
+                df.rename(columns=new_cols, inplace=True)
+                return df
+            return pd.read_csv(filepath)
     except Exception as e:
         logger.warning(f"Cache read failed [{filename}]: {e}")
         return None
@@ -169,7 +176,8 @@ def load_local_cache(filename: str, is_timeseries: bool = False):
 def save_local_cache(df: pd.DataFrame, filename: str):
     filepath = os.path.join(DATA_DIR, filename)
     try:
-        df.to_csv(filepath)
+        with _CSV_LOCK:
+            df.to_csv(filepath)
     except Exception as e:
         logger.warning(f"Cache write failed [{filename}]: {e}")
 
@@ -247,12 +255,31 @@ def get_etf_510050(force_refresh: bool = False):
 #   同理: 首次同步拉取, 后续 SWR 后台刷新
 # ══════════════════════════════════════════════════════
 def _fetch_options_sync():
-    """同步拉取期权数据 (阻塞, 用于首次冷启动)"""
-    import os
-    # 强制 requests 绕过本地系统代理 (避免 Clash/V2ray TUN 模式阻断 EastMoney)
-    os.environ["NO_PROXY"] = "*"
-    import akshare as ak
-    last_error = None
+    """同步拉取期权数据 (阻塞, 用于首次冷启动)
+
+    优先使用新浪财经数据源 (海外环境更友好), 若失败再尝试 akshare.
+    """
+    # 1) 新浪财经作为主数据源
+    try:
+        df_sina, src = fetch_50etf_options_sina()
+        if df_sina is not None and not df_sina.empty:
+            save_local_cache(df_sina, "options_50.csv")
+            logger.info(f"Options sync fetch OK via Sina: {len(df_sina)} contracts")
+            return df_sina, src
+    except Exception as e:
+        last_error = e
+        logger.warning(f"Sina options fetch failed: {e}")
+    else:
+        last_error = None
+
+    # 2) akshare 作为最终 fallback (本地开发环境更可能成功)
+    try:
+        import akshare as ak  # type: ignore
+    except Exception as e:
+        last_error = e
+        logger.warning(f"Akshare import failed, skip fallback: {e}")
+        return None, f"Sina & Akshare 均不可用: {last_error}"
+
     for attempt in range(3):
         try:
             df_full = ak.option_current_em()
@@ -262,32 +289,43 @@ def _fetch_options_sync():
                 df_50 = df_full[mask].copy()
                 if not df_50.empty:
                     save_local_cache(df_50, "options_50.csv")
-                    logger.info(f"Options sync fetch OK: {len(df_50)} contracts (attempt {attempt+1})")
-                    return df_50, "Loaded"
+                    logger.info(f"Options sync fetch OK via Akshare: {len(df_50)} contracts (attempt {attempt+1})")
+                    return df_50, "Akshare loaded"
         except Exception as e:
             last_error = e
-            logger.warning(f"Options sync fetch attempt {attempt+1}/3 failed: {e}")
+            logger.warning(f"Options sync fetch attempt {attempt+1}/3 via Akshare failed: {e}")
             time.sleep(2)
-    return None, f"Akshare 抓取失败: {last_error}"
+
+    return None, f"Sina & Akshare 抓取均失败: {last_error}"
 
 def _fetch_options_bg():
     """后台异步刷新 (SWR)"""
     if not _OPT_LOCK.acquire(blocking=False):
         return
     try:
-        import os
-        os.environ["NO_PROXY"] = "*"
-        import akshare as ak
-        df_full = ak.option_current_em()
-        if df_full is not None and not df_full.empty:
-            mask = df_full['名称'].str.contains('50ETF', na=False) | \
-                   df_full['代码'].str.startswith('100', na=False)
-            df_50 = df_full[mask].copy()
-            if not df_50.empty:
-                save_local_cache(df_50, "options_50.csv")
-                logger.info(f"Options bg refresh OK: {len(df_50)} contracts")
-    except Exception as e:
-        logger.warning(f"Options bg fetch failed: {e}")
+        # 优先尝试新浪数据源
+        try:
+            df_sina, _ = fetch_50etf_options_sina()
+            if df_sina is not None and not df_sina.empty:
+                save_local_cache(df_sina, "options_50.csv")
+                logger.info(f"Options bg refresh OK via Sina: {len(df_sina)} contracts")
+                return
+        except Exception as e:
+            logger.warning(f"Options bg refresh via Sina failed: {e}")
+
+        # 若新浪失败，再尝试 akshare 作为降级方案
+        try:
+            import akshare as ak  # type: ignore
+            df_full = ak.option_current_em()
+            if df_full is not None and not df_full.empty:
+                mask = df_full['名称'].str.contains('50ETF', na=False) | \
+                       df_full['代码'].str.startswith('100', na=False)
+                df_50 = df_full[mask].copy()
+                if not df_50.empty:
+                    save_local_cache(df_50, "options_50.csv")
+                    logger.info(f"Options bg refresh OK via Akshare: {len(df_50)} contracts")
+        except Exception as e:
+            logger.warning(f"Options bg fetch via Akshare failed: {e}")
     finally:
         _OPT_LOCK.release()
 
@@ -868,7 +906,7 @@ else:
 # ── 底部状态栏 ────────────────────────────────────────
 st.markdown(
     f"<div style='text-align:right; color:#787b86; margin-top:16px; font-size:0.72rem; border-top:1px solid #2a2e39; padding-top:8px;'>"
-    f"VolGuard Pro v6.0 &nbsp;|&nbsp; 数据源: yfinance + akshare &nbsp;|&nbsp; {source_etf} / {opt_source} "
+    f"VolGuard Pro v6.1 &nbsp;|&nbsp; 数据源: yfinance + Sina/akshare &nbsp;|&nbsp; {source_etf} / {opt_source} "
     f"&nbsp;|&nbsp; {datetime.now().strftime('%H:%M:%S')}</div>",
     unsafe_allow_html=True
 )

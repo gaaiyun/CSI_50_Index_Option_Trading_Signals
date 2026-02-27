@@ -6,10 +6,10 @@ VolGuard Pro — PushPlus 消息推送模块 (v6.0)
 安全规范: Token 和 Secret 不得硬编码.
 使用方式:
   - 本地: 在项目根目录创建 .streamlit/secrets.toml, 写入:
-        [pushplus]
-        token = "your_token"
-        secret = "your_secret"
-  - Streamlit Cloud: 在 App Settings > Secrets 中配置
+        pushplus_token  = "your_token"
+        pushplus_secret = "your_secret"
+  - Streamlit Cloud: 在 App Settings > Secrets 中配置同名键
+  - 环境变量: PUSHPLUS_TOKEN / PUSHPLUS_SECRET
 """
 
 import hashlib
@@ -115,13 +115,26 @@ class PushPlus:
 
 def get_push_client(token: Optional[str] = None, secret: Optional[str] = None) -> Optional[PushPlus]:
     """
-    工厂函数: 从参数或环境变量创建推送客户端
+    工厂函数: 创建推送客户端
 
     优先级: 参数 > st.secrets > 环境变量
     """
     import os
-    _token = token or os.environ.get("PUSHPLUS_TOKEN", "")
-    _secret = secret or os.environ.get("PUSHPLUS_SECRET", "")
+
+    def _resolve(param: Optional[str], secrets_key: str, env_key: str) -> str:
+        if param:
+            return param
+        try:
+            import streamlit as st
+            val = st.secrets.get(secrets_key, "")
+            if val:
+                return val
+        except Exception:
+            pass
+        return os.environ.get(env_key, "")
+
+    _token = _resolve(token, "pushplus_token", "PUSHPLUS_TOKEN")
+    _secret = _resolve(secret, "pushplus_secret", "PUSHPLUS_SECRET")
 
     if not _token:
         logger.warning("PushPlus token not configured; push notifications disabled.")

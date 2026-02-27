@@ -8,27 +8,26 @@ echo  ║   VolGuard Pro  v6.0  启动检查          ║
 echo  ╚══════════════════════════════════════════╝
 echo.
 
-REM 硬编码 Python 路径 (Python 3.12)
-set PYTHON=C:\Users\gaaiy\AppData\Local\Programs\Python\Python312\python.exe
-set STREAMLIT=C:\Users\gaaiy\AppData\Local\Programs\Python\Python312\Scripts\streamlit.exe
-
-REM 检查 Python 可用性
-"%PYTHON%" --version >nul 2>&1
+REM 从 PATH 中查找 Python 和 Streamlit
+where python >nul 2>&1
 if errorlevel 1 (
-    echo [错误] 未找到 Python，请先安装 Python 3.12+
+    echo [错误] 未在 PATH 中找到 Python，请先安装 Python 3.9+ 并添加到系统 PATH
     pause
     exit /b 1
 )
 
+set PYTHON=python
+set STREAMLIT=streamlit
+
 echo [1/4] 检查 Python 版本...
-"%PYTHON%" --version
+%PYTHON% --version
 
 REM 检查核心依赖 (全量)
 echo [2/4] 检查依赖包...
-"%PYTHON%" -c "import streamlit, pandas, numpy, yfinance, akshare, arch, statsmodels, scipy, pyecharts, streamlit_echarts" 2>nul
+%PYTHON% -c "import streamlit, pandas, numpy, yfinance, akshare, arch, statsmodels, scipy, pyecharts, streamlit_echarts" 2>nul
 if errorlevel 1 (
     echo [提示] 正在安装缺失依赖包，请稍候...
-    "%PYTHON%" -m pip install streamlit pandas numpy yfinance akshare arch statsmodels scipy pyecharts streamlit-echarts -q
+    %PYTHON% -m pip install -r "%~dp0requirements.txt" -q
     if errorlevel 1 (
         echo [错误] 依赖安装失败，请检查网络连接后重试。
         pause

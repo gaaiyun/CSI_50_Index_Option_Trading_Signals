@@ -52,8 +52,7 @@ class StrategyIndicators:
             bsadf_series = pd.Series(index=log_prices.index, dtype=float)
             sup_adf = -np.inf
 
-            # 将最近 200 根缩减为 20 根 K 线的 BSADF (极大缓解初次加载的卡顿，由几分钟降低至几秒)
-            start_search_idx = max(window, n - 20)
+            start_search_idx = max(window, n - 200)
 
             for t_idx in range(start_search_idx, n):
                 current_sup_adf = -np.inf
@@ -88,20 +87,15 @@ class StrategyIndicators:
     def calculate_garch_var(
         self,
         prices: pd.Series,
-        confidence_levels: List[float] = [0.90, 0.95, 0.99],
+        confidence_levels: Optional[List[float]] = None,
         window: int = 250
     ) -> Dict:
         """
         Multi-Distribution GARCH VaR — 三重分布防线
 
-        关键修正:
-        - Skew-t 分位数改为 scipy.stats.t.ppf(1-cl, df=nu) 真实计算
-        - 同时输出上行 (call) 和下行 (put) 双向极值
-        - 不再使用任意 1.2/1.35 乘数
-
         参数:
             prices: 日线收盘价序列
-            confidence_levels: 置信水平列表
+            confidence_levels: 置信水平列表, 默认 [0.90, 0.95, 0.99]
             window: GARCH 拟合窗口 (250 个交易日 = 1 年)
 
         返回:
@@ -110,6 +104,9 @@ class StrategyIndicators:
         try:
             from arch import arch_model
             import scipy.stats as stats
+
+            if confidence_levels is None:
+                confidence_levels = [0.90, 0.95, 0.99]
 
             returns = np.log(prices / prices.shift(1)).dropna()
             recent_returns = returns.iloc[-window:]
@@ -159,7 +156,7 @@ class StrategyIndicators:
                 results['norm_error'] = str(e)
 
             # ════════════════════════════════════════════════════════
-            # 模型 2: 偏态 t 分布 GARCH(1,1) — 修正 Skew-t 分位数
+            # 模型 2: 偏态 t 分布 GARCH(1,1) — 使用 arch 内置 SkewStudent ppf
             # ════════════════════════════════════════════════════════
             try:
                 am_skew = arch_model(data_scaled, vol='Garch', p=1, q=1, dist='skewstudent')
@@ -169,22 +166,19 @@ class StrategyIndicators:
 
                 results['sigma_skew'] = float(sigma_skew)
 
-                # ── 从拟合结果提取形状参数 ──────────────────────────
-                nu = float(res_skew.params.get('nu', 10.0))    # 自由度, >2
+                nu = float(res_skew.params.get('nu', 10.0))
                 nu = max(nu, 2.5)
-                lam = float(res_skew.params.get('lambda', 0.0))  # 偏度 (-1,1)
+                lam = float(res_skew.params.get('lambda', 0.0))
+
+                skew_dist = am_skew.distribution
+                dist_params = np.array([nu, lam])
 
                 for cl in confidence_levels:
                     cl_str = "975" if cl == 0.975 else str(int(cl*100))
-                    # ─ 下行 (Put 认沽防线): 左尾极值 — 使用 1-cl 最严格
-                    q_put_raw = stats.t.ppf(1.0 - cl, df=nu)   # 负值
-                    # ─ 上行 (Call 认购防线): 右尾极值
-                    q_call_raw = stats.t.ppf(cl, df=nu)         # 正值
-                    # ─ 偏度修正: 偏态 t 右尾比左尾多出 |lam * sigma| 的胖尾
-                    skew_adj_put = 1.0 + max(-lam, 0) * 0.3
-                    skew_adj_call = 1.0 + max(lam, 0) * 0.3
-                    results[f'skew_{cl_str}_put'] = float(abs(q_put_raw) * sigma_skew * skew_adj_put)
-                    results[f'skew_{cl_str}_call'] = float(q_call_raw * sigma_skew * skew_adj_call)
+                    q_put_raw = skew_dist.ppf(1.0 - cl, dist_params)
+                    q_call_raw = skew_dist.ppf(cl, dist_params)
+                    results[f'skew_{cl_str}_put'] = float(abs(q_put_raw) * sigma_skew)
+                    results[f'skew_{cl_str}_call'] = float(q_call_raw * sigma_skew)
 
             except Exception as e:
                 logger.warning(f"Skew-t GARCH failed: {e}")
@@ -202,9 +196,8 @@ class StrategyIndicators:
             results['sigma_jump'] = extreme_buf  # 向后兼容
 
             for cl in confidence_levels:
-                import scipy.stats as stats2
                 cl_str = "975" if cl == 0.975 else str(int(cl*100))
-                z = stats2.norm.ppf(cl)
+                z = stats.norm.ppf(cl)
                 results[f'jump_{cl_str}_put'] = float(z * extreme_buf)
                 results[f'jump_{cl_str}_call'] = float(z * extreme_buf)
 
@@ -328,16 +321,6 @@ class StrategyIndicators:
         """
         current_otm = self.calculate_otm_level(spot_price, strike_price, option_type)
         return current_otm < stop_otm
-
-
-def get_index_data(symbol: str = "000016") -> pd.DataFrame:
-    """获取指数数据 (akshare)"""
-    import akshare as ak
-    df = ak.stock_zh_index_daily_em(symbol=symbol)
-    col_map = {'日期': 'date', '收盘': 'close', '开盘': 'open',
-                '最高': 'high', '最低': 'low', '成交量': 'volume'}
-    df.rename(columns=col_map, inplace=True)
-    return df
 
 
 if __name__ == "__main__":

@@ -1,12 +1,16 @@
-streamlit==1.54.0
-pandas==2.3.3
-numpy==2.4.2
-akshare==1.18.25
-arch==8.0.0
-statsmodels==0.14.6
-scipy==1.17.0
-requests==2.32.5
-yfinance==1.2.0
-pyecharts==2.1.0
-streamlit-echarts==0.4.0
-simplejson==3.20.2
+streamlit>=1.38.0,<2.0
+pandas>=2.1.0,<3.0
+numpy>=1.26.0,<3.0
+arch>=7.0.0,<8.0
+statsmodels>=0.14.0,<1.0
+scipy>=1.12.0,<2.0
+requests>=2.31.0,<3.0
+yfinance>=0.2.36
+pyecharts>=2.0.0,<3.0
+streamlit-echarts>=0.4.0,<1.0
+simplejson>=3.19.0,<4.0
+
+# 可选: akshare 作为期权数据的 fallback 数据源
+# Streamlit Cloud 上可能因东方财富 IP 限制而失效，主数据源已切换为新浪财经
+# 本地开发时建议安装: pip install akshare
+# akshare>=1.14.0
