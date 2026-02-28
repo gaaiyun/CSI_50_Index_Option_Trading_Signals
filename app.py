@@ -46,7 +46,7 @@ except ImportError:
             st.components.v1.html(chart.render_embed(), height=900, scrolling=False)
 
 from strategy.indicators import StrategyIndicators
-from data_sources import fetch_50etf_options_sina
+from data_sources import fetch_50etf_options_sina, add_implied_volatility
 
 # ══════════════════════════════════════════════════════
 # 日志配置
@@ -707,6 +707,15 @@ if df_etf is None or df_etf.empty:
     st.stop()
 
 prices = df_etf['Close'].dropna()
+spot = float(prices.iloc[-1])
+
+# 为期权数据添加隐含波动率（从价格反推）
+if options_df is not None and not options_df.empty:
+    try:
+        options_df = add_implied_volatility(options_df, spot)
+        logger.info(f"Added IV to {len(options_df)} option contracts")
+    except Exception as e:
+        logger.warning(f"Failed to add IV: {e}")
 
 # ── 计算指标 (缓存) ────────────────────────────────────
 with st.spinner("GARCH VaR 分析中…"):
@@ -716,7 +725,6 @@ with st.spinner("BSADF 泡沫测试中…"):
     bsadf_result = _cached_bsadf(tuple(prices.round(6).tolist()))
 
 returns      = np.log(prices / prices.shift(1)).dropna()
-spot         = float(prices.iloc[-1])
 change_pct   = float((prices.iloc[-1] / prices.iloc[-2] - 1) * 100)
 bsadf_stat   = bsadf_result.get('adf_stat', 0.0)
 bsadf_cv     = bsadf_result.get('cv', 2.0)

@@ -11,7 +11,6 @@ pyecharts>=2.0.0,<3.0
 streamlit-echarts>=0.4.0,<0.5
 simplejson>=3.19.0,<4.0
 
-# 可选: akshare 作为期权数据的 fallback 数据源
+# akshare 作为期权数据的 fallback 数据源
 # Streamlit Cloud 上可能因东方财富 IP 限制而失效，主数据源已切换为新浪财经
-# 本地开发时建议安装: pip install akshare
-# akshare>=1.14.0
+akshare>=1.14.0

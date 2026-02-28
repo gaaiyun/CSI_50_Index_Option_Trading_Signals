@@ -17,6 +17,9 @@ from typing import List, Tuple
 
 import pandas as pd
 import requests
+import numpy as np
+from scipy.stats import norm
+from scipy.optimize import brentq
 
 logger = logging.getLogger(__name__)
 
@@ -197,5 +200,106 @@ def fetch_50etf_options_sina() -> tuple[pd.DataFrame, str]:
     return df, "Sina options loaded"
 
 
-__all__ = ["fetch_50etf_options_sina"]
+__all__ = ["fetch_50etf_options_sina", "add_implied_volatility"]
+
+
+def _bs_call_price(S, K, T, r, sigma):
+    """Black-Scholes 认购期权定价"""
+    if T <= 0 or sigma <= 0:
+        return max(S - K, 0)
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+    return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+
+
+def _bs_put_price(S, K, T, r, sigma):
+    """Black-Scholes 认沽期权定价"""
+    if T <= 0 or sigma <= 0:
+        return max(K - S, 0)
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+    return K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+
+
+def _calculate_tte(name: str) -> float:
+    """从合约名称提取到期时间（年）"""
+    from datetime import datetime, timedelta
+    try:
+        if isinstance(name, str) and len(name) >= 11:
+            year_month = name[7:11]
+            year = 2000 + int(year_month[:2])
+            month = int(year_month[2:])
+            first_day = datetime(year, month, 1)
+            first_wed = first_day + timedelta(days=(2 - first_day.weekday() + 7) % 7)
+            expiry = first_wed + timedelta(weeks=3)
+            days = (expiry - datetime.now()).days
+            return max(1, days) / 365.0
+    except Exception:
+        pass
+    return 30 / 365.0
+
+
+def _implied_volatility(price, S, K, T, r, opt_type='call'):
+    """从期权价格反推隐含波动率（Brent 方法）"""
+    if price <= 0 or T <= 0:
+        return 0.0
+    
+    intrinsic = max(S - K, 0) if opt_type == 'call' else max(K - S, 0)
+    if price <= intrinsic:
+        return 0.0
+    
+    bs_func = _bs_call_price if opt_type == 'call' else _bs_put_price
+    
+    try:
+        def objective(sigma):
+            return bs_func(S, K, T, r, sigma) - price
+        
+        iv = brentq(objective, 0.001, 5.0, xtol=1e-6, maxiter=100)
+        return iv * 100  # 转换为百分比
+    except Exception:
+        return 20.0  # 默认 20%
+
+
+def add_implied_volatility(df: pd.DataFrame, spot: float, risk_free_rate: float = 0.015) -> pd.DataFrame:
+    """
+    为期权数据添加隐含波动率列
+    
+    参数:
+        df: 期权数据，需包含：名称、最新价、行权价
+        spot: 标的现价
+        risk_free_rate: 无风险利率
+    
+    返回:
+        添加了"隐含波动率"列的 DataFrame
+    """
+    if df is None or df.empty:
+        return df
+    
+    df = df.copy()
+    
+    # 如果已有隐含波动率且非空，直接返回
+    if '隐含波动率' in df.columns and df['隐含波动率'].notna().any():
+        return df
+    
+    ivs = []
+    for _, row in df.iterrows():
+        try:
+            price = float(row.get('最新价', 0))
+            strike = float(row.get('行权价', 0))
+            name = str(row.get('名称', ''))
+            
+            if price <= 0 or strike <= 0:
+                ivs.append(0.0)
+                continue
+            
+            tte = _calculate_tte(name)
+            opt_type = 'call' if '购' in name else 'put'
+            
+            iv = _implied_volatility(price, spot, strike, tte, risk_free_rate, opt_type)
+            ivs.append(iv)
+        except Exception:
+            ivs.append(0.0)
+    
+    df['隐含波动率'] = ivs
+    return df
 
