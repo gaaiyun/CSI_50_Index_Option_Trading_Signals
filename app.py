@@ -932,24 +932,19 @@ if options_df is not None and not options_df.empty:
             if col in show_df.columns:
                 show_df[col] = pd.to_numeric(show_df[col], errors='coerce')
 
-        # ── 区分认购/认沽方向计算 OTM ────────────────
-        def _option_type(name: str) -> str:
-            if isinstance(name, str):
-                if '购' in name: return 'call'
-                if '沽' in name: return 'put'
-            return 'auto'
-
-        def _otm(row) -> float:
-            ot = _option_type(str(row.get('名称', '')))
-            s, k = spot, row.get('行权价', np.nan)
-            if pd.isna(k) or k <= 0: return 0.0
-            if ot == 'call': return (k - s) / s * 100
-            if ot == 'put':  return (s - k) / s * 100
-            return abs(s - k) / s * 100
-
-        show_df['类型'] = show_df['名称'].apply(_option_type).map({'call': '认购', 'put': '认沽', 'auto': '-'})
-        show_df['虚值空间(%)'] = show_df.apply(_otm, axis=1).round(2)
-        show_df['VaR缓冲(%)']  = (show_df['虚值空间(%)'] - var_95).round(2)
+        # ── 区分认购/认沽方向计算 OTM（向量化优化）────────────────
+        show_df['类型'] = show_df['名称'].str.contains('购', na=False).map({True: '认购', False: '认沽'})
+        
+        # 向量化计算 OTM
+        is_call = show_df['类型'] == '认购'
+        is_put = show_df['类型'] == '认沽'
+        k = show_df['行权价']
+        
+        show_df['虚值空间(%)'] = 0.0
+        show_df.loc[is_call, '虚值空间(%)'] = ((k[is_call] - spot) / spot * 100).round(2)
+        show_df.loc[is_put, '虚值空间(%)'] = ((spot - k[is_put]) / spot * 100).round(2)
+        
+        show_df['VaR缓冲(%)'] = (show_df['虚值空间(%)'] - var_95).round(2)
 
         # 买卖价差
         if '买入价' in show_df.columns and '卖出价' in show_df.columns:
@@ -970,19 +965,15 @@ if options_df is not None and not options_df.empty:
         if '涨跌幅' in show_df.columns:    fmt['涨跌幅']    = '{:.2f}%'
         if '买卖价差' in show_df.columns:  fmt['买卖价差']  = '{:.4f}'
 
+        # 向量化高亮规则
         def _highlight(row):
-            otm_v = row.get('虚值空间(%)', 0)
-            buf_v = row.get('VaR缓冲(%)', 0)
-            option_type = row.get('类型', '-')
-            stop = (var_95_p if option_type == '认沽' else var_95_c)
-
-            # 绿: 深度虚值 + 安全垫充足
+            otm_v, buf_v, opt_type = row['虚值空间(%)'], row['VaR缓冲(%)'], row['类型']
+            stop = var_95_p if opt_type == '认沽' else var_95_c
+            
             if otm_v >= otm and buf_v > 2.0:
                 return ['background-color: rgba(8,153,129,0.15); color:#089981; font-weight:600'] * len(row)
-            # 红: 虚值已低于止损线
             elif otm_v < stop_loss:
                 return ['color:#f23645; font-weight:600'] * len(row)
-            # 黄: 接近警戒
             elif buf_v < 1.0:
                 return ['color:#f5a623'] * len(row)
             return [''] * len(row)
