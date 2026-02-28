@@ -310,9 +310,6 @@ def fetch_50etf_options_yfinance() -> tuple[pd.DataFrame, str]:
     return pd.DataFrame(), "yfinance 无 50ETF 期权数据"
 
 
-__all__ = ["fetch_50etf_options_sina", "fetch_50etf_options_yfinance", "fetch_50etf_options_eastmoney", "add_implied_volatility"]
-
-
 def fetch_50etf_options_eastmoney() -> tuple[pd.DataFrame, str]:
     """
     从东方财富获取 50ETF 期权数据（作为 fallback）
@@ -520,3 +517,5 @@ def add_implied_volatility(df: pd.DataFrame, spot: float, risk_free_rate: float 
     df['隐含波动率'] = ivs
     return df
 
+
+__all__ = ["fetch_50etf_options_sina", "fetch_50etf_options_yfinance", "fetch_50etf_options_eastmoney", "add_implied_volatility", "clean_option_data"]
