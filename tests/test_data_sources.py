@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from data_sources import (
     fetch_50etf_options_sina,
+    fetch_50etf_options_yfinance,
     _get_option_months_sina,
     _get_option_codes_sina,
     _get_option_detail_sina,
@@ -133,6 +134,75 @@ class TestFetch50etfOptionsSina:
         assert "Sina 合约月份获取失败" in msg or "失败" in msg
 
 
+class TestFetch50etfOptionsYfinance:
+    """fetch_50etf_options_yfinance 集成（mock yfinance）"""
+
+    def test_returns_tuple_df_msg(self):
+        mock_ticker = MagicMock()
+        mock_ticker.options = ["2026-03-20", "2026-04-17"]
+        
+        mock_calls = pd.DataFrame({
+            "contractSymbol": ["510050C2603A02500"],
+            "strike": [2.5],
+            "lastPrice": [0.15],
+            "bid": [0.14],
+            "ask": [0.16],
+            "volume": [1000],
+            "openInterest": [5000],
+            "percentChange": [2.5],
+            "impliedVolatility": [0.25],
+        })
+        mock_puts = pd.DataFrame({
+            "contractSymbol": ["510050P2603A02300"],
+            "strike": [2.3],
+            "lastPrice": [0.04],
+            "bid": [0.039],
+            "ask": [0.041],
+            "volume": [500],
+            "openInterest": [3000],
+            "percentChange": [1.2],
+            "impliedVolatility": [0.22],
+        })
+        
+        mock_chain = MagicMock()
+        mock_chain.calls = mock_calls
+        mock_chain.puts = mock_puts
+        mock_ticker.option_chain = MagicMock(return_value=mock_chain)
+        
+        with patch("yfinance.Ticker", return_value=mock_ticker):
+            df, msg = fetch_50etf_options_yfinance()
+        
+        assert isinstance(df, pd.DataFrame)
+        assert "yfinance" in msg
+        if not df.empty:
+            for col in REQUIRED_COLUMNS:
+                assert col in df.columns, f"missing column {col}"
+            assert "类型" in df.columns
+            assert len(df) >= 2
+
+    def test_import_failure_returns_empty(self):
+        import sys
+        yf_backup = sys.modules.get('yfinance')
+        sys.modules['yfinance'] = None
+        try:
+            df, msg = fetch_50etf_options_yfinance()
+            assert df.empty
+            assert "未安装" in msg or "不可用" in msg
+        finally:
+            if yf_backup:
+                sys.modules['yfinance'] = yf_backup
+            else:
+                sys.modules.pop('yfinance', None)
+
+    def test_no_options_returns_empty(self):
+        mock_ticker = MagicMock()
+        mock_ticker.options = None
+        with patch("yfinance.Ticker", return_value=mock_ticker):
+            df, msg = fetch_50etf_options_yfinance()
+        assert df.empty
+        assert "无" in msg or "数据" in msg
+
+
 @pytest.mark.online
 class TestFetch50etfOptionsSinaOnline:
     """真实 HTTP 请求，仅本地或显式 -m online 时运行"""
@@ -145,3 +215,17 @@ class TestFetch50etfOptionsSinaOnline:
             for col in REQUIRED_COLUMNS:
                 assert col in df.columns
             assert len(df) > 0
+
+
+@pytest.mark.online
+class TestFetch50etfOptionsYfinanceOnline:
+    """真实 yfinance 请求，仅本地或显式 -m online 时运行"""
+
+    def test_fetch_attempts_connection(self):
+        df, msg = fetch_50etf_options_yfinance()
+        assert isinstance(df, pd.DataFrame)
+        assert isinstance(msg, str)
+        # 510050 在 Yahoo 上可能无数据，所以不强制要求非空
+        if not df.empty:
+            for col in REQUIRED_COLUMNS:
+                assert col in df.columns
