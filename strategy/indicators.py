@@ -322,6 +322,185 @@ class StrategyIndicators:
         current_otm = self.calculate_otm_level(spot_price, strike_price, option_type)
         return current_otm < stop_otm
 
+    def calculate_greeks(
+        self,
+        spot: float,
+        strike: float,
+        time_to_expiry: float,
+        volatility: float,
+        risk_free_rate: float = 0.015,
+        option_type: str = 'call'
+    ) -> Dict:
+        """
+        Black-Scholes Greeks 计算 (Delta/Gamma/Vega/Theta)
+
+        参数:
+            spot: 标的现价
+            strike: 行权价
+            time_to_expiry: 到期时间(年), 如 30天 = 30/365
+            volatility: 隐含波动率(小数), 如 0.25 = 25%
+            risk_free_rate: 无风险利率, 默认 1.5%
+            option_type: 'call' | 'put'
+
+        返回:
+            dict: {delta, gamma, vega, theta, price}
+        """
+        from scipy import stats
+        
+        if spot <= 0 or strike <= 0 or time_to_expiry <= 0 or volatility <= 0:
+            return {'delta': 0.0, 'gamma': 0.0, 'vega': 0.0, 'theta': 0.0, 'price': 0.0}
+
+        try:
+            sqrt_t = np.sqrt(time_to_expiry)
+            d1 = (np.log(spot / strike) + (risk_free_rate + 0.5 * volatility ** 2) * time_to_expiry) / (volatility * sqrt_t)
+            d2 = d1 - volatility * sqrt_t
+
+            nd1 = stats.norm.cdf(d1)
+            nd2 = stats.norm.cdf(d2)
+            nprime_d1 = stats.norm.pdf(d1)
+
+            if option_type.lower() == 'call':
+                delta = nd1
+                price = spot * nd1 - strike * np.exp(-risk_free_rate * time_to_expiry) * nd2
+                theta = (-spot * nprime_d1 * volatility / (2 * sqrt_t) 
+                        - risk_free_rate * strike * np.exp(-risk_free_rate * time_to_expiry) * nd2) / 365
+            else:
+                delta = nd1 - 1
+                price = strike * np.exp(-risk_free_rate * time_to_expiry) * stats.norm.cdf(-d2) - spot * stats.norm.cdf(-d1)
+                theta = (-spot * nprime_d1 * volatility / (2 * sqrt_t) 
+                        + risk_free_rate * strike * np.exp(-risk_free_rate * time_to_expiry) * stats.norm.cdf(-d2)) / 365
+
+            gamma = nprime_d1 / (spot * volatility * sqrt_t)
+            vega = spot * nprime_d1 * sqrt_t / 100
+
+            return {
+                'delta': float(delta),
+                'gamma': float(gamma),
+                'vega': float(vega),
+                'theta': float(theta),
+                'price': float(price)
+            }
+
+        except Exception as e:
+            logger.warning(f"Greeks calculation failed: {e}")
+            return {'delta': 0.0, 'gamma': 0.0, 'vega': 0.0, 'theta': 0.0, 'price': 0.0}
+
+    def calculate_market_exposure(
+        self,
+        options_df: pd.DataFrame,
+        spot: float,
+        risk_free_rate: float = 0.015
+    ) -> Dict:
+        """
+        计算市场 Gamma/Delta 暴露 (GEX/DEX)
+
+        GEX = Σ(Gamma × OI × 100 × S²) / 10^9  (单位: 十亿)
+        DEX = Σ(Delta × OI × 100 × S) / 10^9
+
+        参数:
+            options_df: 期权链, 需包含: 名称/行权价/隐含波动率/持仓量
+            spot: 标的现价
+            risk_free_rate: 无风险利率
+
+        返回:
+            dict: {gex_call, gex_put, gex_net, dex_call, dex_put, dex_net, 
+                   total_oi_call, total_oi_put, max_pain_strike}
+        """
+        try:
+            df = options_df.copy()
+            
+            for col in ['行权价', '隐含波动率', '持仓量']:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+            df = df.dropna(subset=['行权价', '隐含波动率', '持仓量'])
+            
+            if df.empty:
+                return {'gex_net': 0.0, 'dex_net': 0.0, 'error': 'No valid data'}
+
+            def _type(name):
+                if isinstance(name, str):
+                    if '购' in name: return 'call'
+                    if '沽' in name: return 'put'
+                return 'unknown'
+
+            df['type'] = df['名称'].apply(_type)
+            df = df[df['type'].isin(['call', 'put'])]
+
+            from datetime import datetime, timedelta
+            today = datetime.now()
+            
+            def _tte(name):
+                try:
+                    if isinstance(name, str) and len(name) >= 11:
+                        year_month = name[7:11]
+                        year = 2000 + int(year_month[:2])
+                        month = int(year_month[2:])
+                        first_day = datetime(year, month, 1)
+                        first_wed = first_day + timedelta(days=(2 - first_day.weekday() + 7) % 7)
+                        expiry = first_wed + timedelta(weeks=3)
+                        days = (expiry - today).days
+                        return max(1, days) / 365.0
+                except Exception:
+                    pass
+                return 30 / 365.0
+            
+            df['tte'] = df['名称'].apply(_tte)
+
+            gex_call, gex_put = 0.0, 0.0
+            dex_call, dex_put = 0.0, 0.0
+            oi_call, oi_put = 0.0, 0.0
+
+            for _, row in df.iterrows():
+                strike = row['行权价']
+                iv = row['隐含波动率'] / 100.0 if row['隐含波动率'] > 1 else row['隐含波动率']
+                oi = row['持仓量']
+                tte = row['tte']
+                opt_type = row['type']
+
+                greeks = self.calculate_greeks(spot, strike, tte, iv, risk_free_rate, opt_type)
+                
+                gamma_exp = greeks['gamma'] * oi * 100 * spot * spot / 1e9
+                delta_exp = greeks['delta'] * oi * 100 * spot / 1e9
+
+                if opt_type == 'call':
+                    gex_call += gamma_exp
+                    dex_call += delta_exp
+                    oi_call += oi
+                else:
+                    gex_put += gamma_exp
+                    dex_put += delta_exp
+                    oi_put += oi
+
+            gex_net = gex_call - gex_put
+            dex_net = dex_call + dex_put
+
+            strikes = df['行权价'].unique()
+            max_pain = spot
+            if len(strikes) > 0:
+                pain_scores = []
+                for k in strikes:
+                    call_pain = df[df['type'] == 'call']['持仓量'].sum() * max(0, spot - k)
+                    put_pain = df[df['type'] == 'put']['持仓量'].sum() * max(0, k - spot)
+                    pain_scores.append((k, call_pain + put_pain))
+                max_pain = min(pain_scores, key=lambda x: x[1])[0] if pain_scores else spot
+
+            return {
+                'gex_call': float(gex_call),
+                'gex_put': float(gex_put),
+                'gex_net': float(gex_net),
+                'dex_call': float(dex_call),
+                'dex_put': float(dex_put),
+                'dex_net': float(dex_net),
+                'total_oi_call': float(oi_call),
+                'total_oi_put': float(oi_put),
+                'max_pain_strike': float(max_pain)
+            }
+
+        except Exception as e:
+            logger.error(f"Market exposure calculation failed: {e}", exc_info=True)
+            return {'gex_net': 0.0, 'dex_net': 0.0, 'error': str(e)}
+
 
 if __name__ == "__main__":
     print("StrategyIndicators import OK")

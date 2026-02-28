@@ -693,7 +693,7 @@ with st.sidebar:
 
 # ── 标题 ─────────────────────────────────────────────
 st.markdown('<div class="main-title">VolGuard Pro: 上证50期权风控雷达</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">Multi-GARCH VaR (PSY临界值) | BSADF 泡沫测试 | HV/IV 对比 | SWR 实时缓存框架 (v6.0)</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Multi-GARCH VaR (PSY临界值) | BSADF 泡沫测试 | Greeks GEX/DEX | HV/IV 对比 | SWR 实时缓存框架 (v6.1)</div>', unsafe_allow_html=True)
 
 # ── 数据加载 ──────────────────────────────────────────
 df_etf, source_etf = get_etf_510050(force_refresh=force_refresh)
@@ -734,6 +734,20 @@ hv30_val = float(returns.iloc[-30:].std() * np.sqrt(252) * 100) if len(returns) 
 # Extract new R-style metrics
 robust_vol = garch_result.get('robust_vol', 0.01) * np.sqrt(252) * 100
 lambda_60 = garch_result.get('jump_lambda_60', 0.0) * 100
+
+# ── 计算 GEX/DEX 市场暴露 ──────────────────────────────
+gex_dex_result = {'gex_net': 0.0, 'dex_net': 0.0, 'max_pain_strike': spot}
+if options_df is not None and not options_df.empty:
+    try:
+        gex_dex_result = indicators.calculate_market_exposure(options_df, spot)
+    except Exception as e:
+        logger.warning(f"GEX/DEX calculation failed: {e}")
+
+gex_net = gex_dex_result.get('gex_net', 0.0)
+dex_net = gex_dex_result.get('dex_net', 0.0)
+max_pain = gex_dex_result.get('max_pain_strike', spot)
+gex_call = gex_dex_result.get('gex_call', 0.0)
+gex_put = gex_dex_result.get('gex_put', 0.0)
 
 # 信号生成
 if triggered:
@@ -791,6 +805,49 @@ with c4:
         <div class="metric-title">系统状态</div>
         <div class="metric-value {sig_color}" style="font-size:1.0rem;">{signal}</div>
         <div class="metric-sub">{action}</div>
+    </div>""", unsafe_allow_html=True)
+
+# ── GEX/DEX 市场暴露面板 ──────────────────────────────
+st.markdown("<div style='font-size:0.9rem; font-weight:500; color:#787b86; text-transform:uppercase; letter-spacing:1px; margin:18px 0 10px;'>Greeks 市场暴露 (Gamma/Delta Exposure)</div>", unsafe_allow_html=True)
+g1, g2, g3, g4 = st.columns(4)
+
+with g1:
+    gex_color = "color-green" if gex_net > 0 else "color-red"
+    gex_card = "card-green" if gex_net > 0 else "card-red"
+    st.markdown(f"""
+    <div class="metric-card {gex_card}">
+        <div class="metric-title">Net GEX (Gamma 暴露)</div>
+        <div class="metric-value {gex_color}">{gex_net:+.2f}B</div>
+        <div class="metric-sub">Call: {gex_call:.2f}B | Put: {gex_put:.2f}B</div>
+    </div>""", unsafe_allow_html=True)
+
+with g2:
+    dex_color = "color-blue"
+    st.markdown(f"""
+    <div class="metric-card card-blue">
+        <div class="metric-title">Net DEX (Delta 暴露)</div>
+        <div class="metric-value {dex_color}">{dex_net:+.2f}B</div>
+        <div class="metric-sub">做市商对冲方向性风险</div>
+    </div>""", unsafe_allow_html=True)
+
+with g3:
+    pain_diff = ((max_pain - spot) / spot * 100) if spot > 0 else 0
+    pain_color = "color-red" if pain_diff < -1 else ("color-green" if pain_diff > 1 else "")
+    st.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-title">Max Pain 行权价</div>
+        <div class="metric-value {pain_color}">{max_pain:.3f}</div>
+        <div class="metric-sub">偏离现价: {pain_diff:+.2f}%</div>
+    </div>""", unsafe_allow_html=True)
+
+with g4:
+    gex_regime = "高波动" if abs(gex_net) > 1.0 else "低波动"
+    gex_regime_color = "color-orange" if abs(gex_net) > 1.0 else "color-blue"
+    st.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-title">GEX 市场状态</div>
+        <div class="metric-value {gex_regime_color}" style="font-size:1.0rem;">{gex_regime}</div>
+        <div class="metric-sub">|GEX| > 1B 触发高波动预警</div>
     </div>""", unsafe_allow_html=True)
 
 st.markdown("<div class='section-divider'></div>", unsafe_allow_html=True)

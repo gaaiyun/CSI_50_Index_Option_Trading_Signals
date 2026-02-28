@@ -120,3 +120,84 @@ class TestCheckStopLoss:
     def test_call_stop_not_triggered_when_otm_above_threshold(self, indicators):
         # spot=2.5, strike=2.8 -> call otm = 12%
         assert indicators.check_stop_loss(2.5, 2.8, "call", stop_otm=6.4) is False
+
+
+class TestCalculateGreeks:
+    """Black-Scholes Greeks 计算"""
+
+    def test_call_greeks_structure(self, indicators):
+        result = indicators.calculate_greeks(
+            spot=2.5, strike=2.6, time_to_expiry=30/365, volatility=0.25, option_type='call'
+        )
+        assert "delta" in result
+        assert "gamma" in result
+        assert "vega" in result
+        assert "theta" in result
+        assert "price" in result
+
+    def test_call_delta_range(self, indicators):
+        result = indicators.calculate_greeks(
+            spot=2.5, strike=2.6, time_to_expiry=30/365, volatility=0.25, option_type='call'
+        )
+        assert 0 <= result["delta"] <= 1
+
+    def test_put_delta_range(self, indicators):
+        result = indicators.calculate_greeks(
+            spot=2.5, strike=2.4, time_to_expiry=30/365, volatility=0.25, option_type='put'
+        )
+        assert -1 <= result["delta"] <= 0
+
+    def test_gamma_positive(self, indicators):
+        result = indicators.calculate_greeks(
+            spot=2.5, strike=2.5, time_to_expiry=30/365, volatility=0.25, option_type='call'
+        )
+        assert result["gamma"] > 0
+
+    def test_vega_positive(self, indicators):
+        result = indicators.calculate_greeks(
+            spot=2.5, strike=2.5, time_to_expiry=30/365, volatility=0.25, option_type='call'
+        )
+        assert result["vega"] > 0
+
+    def test_invalid_inputs_return_zeros(self, indicators):
+        result = indicators.calculate_greeks(
+            spot=0, strike=2.5, time_to_expiry=30/365, volatility=0.25, option_type='call'
+        )
+        assert result["delta"] == 0.0
+        assert result["gamma"] == 0.0
+
+
+class TestCalculateMarketExposure:
+    """GEX/DEX 市场暴露计算"""
+
+    def test_returns_structure(self, indicators):
+        df = pd.DataFrame({
+            '名称': ['510050C2602M02500', '510050P2602M02400'],
+            '行权价': [2.5, 2.4],
+            '隐含波动率': [25.0, 28.0],
+            '持仓量': [10000, 8000]
+        })
+        result = indicators.calculate_market_exposure(df, spot=2.45)
+        assert "gex_call" in result
+        assert "gex_put" in result
+        assert "gex_net" in result
+        assert "dex_call" in result
+        assert "dex_put" in result
+        assert "dex_net" in result
+        assert "max_pain_strike" in result
+
+    def test_empty_dataframe_returns_zeros(self, indicators):
+        df = pd.DataFrame()
+        result = indicators.calculate_market_exposure(df, spot=2.5)
+        assert result["gex_net"] == 0.0
+        assert result["dex_net"] == 0.0
+
+    def test_max_pain_calculated(self, indicators):
+        df = pd.DataFrame({
+            '名称': ['510050C2602M02500', '510050P2602M02400'],
+            '行权价': [2.5, 2.4],
+            '隐含波动率': [25.0, 28.0],
+            '持仓量': [10000, 8000]
+        })
+        result = indicators.calculate_market_exposure(df, spot=2.45)
+        assert result["max_pain_strike"] > 0
