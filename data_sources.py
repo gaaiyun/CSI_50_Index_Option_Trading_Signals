@@ -13,7 +13,10 @@ VolGuard Pro — 期权数据源模块
 
 import logging
 import re
-from typing import List, Tuple
+import time
+import random
+from typing import List, Tuple, Callable, Any
+from functools import wraps
 
 import pandas as pd
 import requests
@@ -24,16 +27,47 @@ from scipy.optimize import brentq
 logger = logging.getLogger(__name__)
 
 
+# 反爬虫策略：多个 User-Agent 轮换
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+]
+
 SINA_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0 Safari/537.36"
-    ),
+    "User-Agent": USER_AGENTS[0],
     "Referer": "https://stock.finance.sina.com.cn/",
 }
 
 
+def retry_with_backoff(max_retries: int = 3, base_delay: float = 0.5) -> Callable:
+    """重试装饰器，带指数退避"""
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(*args, **kwargs) -> Any:
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        raise
+                    delay = base_delay * (2 ** attempt) + random.uniform(0, 0.5)
+                    logger.warning(f"{func.__name__} failed (attempt {attempt+1}/{max_retries}): {e}, retrying in {delay:.2f}s")
+                    time.sleep(delay)
+            return None
+        return wrapper
+    return decorator
+
+
+def get_random_headers(referer: str = None) -> dict:
+    """获取随机 User-Agent 的请求头"""
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    if referer:
+        headers["Referer"] = referer
+    return headers
+
+
+@retry_with_backoff(max_retries=3, base_delay=0.5)
 def _get_option_months_sina(underlying: str = "510050") -> List[str]:
     """
     从新浪获取可用期权月份列表。
@@ -44,28 +78,25 @@ def _get_option_months_sina(underlying: str = "510050") -> List[str]:
         "http://stock.finance.sina.com.cn/futures/api/openapi.php/"
         "StockOptionService.getStockName"
     )
-    try:
-        resp = requests.get(url, headers=SINA_HEADERS, timeout=8)
-        resp.raise_for_status()
-        data = resp.json()
-        result = data.get("result", {}).get("data", {})
-        months = result.get("contractMonth", []) or []
-        parsed = []
-        for m in months:
-            if isinstance(m, str):
-                if m.isdigit():
-                    parsed.append(m)
-                elif len(m) == 7 and m[4] == "-":  # "YYYY-MM" -> "YYMM"
-                    parsed.append(m[2:4] + m[5:7])
-        months = parsed
-        if not months:
-            logger.warning(f"Sina getStockName returned empty months, raw data keys: {list(result.keys())}")
-        else:
-            logger.info(f"Sina months OK: {months}")
-        return months
-    except Exception as e:
-        logger.warning(f"Sina getStockName failed: {e}")
-        return []
+    headers = get_random_headers("https://stock.finance.sina.com.cn/")
+    resp = requests.get(url, headers=headers, timeout=8)
+    resp.raise_for_status()
+    data = resp.json()
+    result = data.get("result", {}).get("data", {})
+    months = result.get("contractMonth", []) or []
+    parsed = []
+    for m in months:
+        if isinstance(m, str):
+            if m.isdigit():
+                parsed.append(m)
+            elif len(m) == 7 and m[4] == "-":  # "YYYY-MM" -> "YYMM"
+                parsed.append(m[2:4] + m[5:7])
+    months = parsed
+    if not months:
+        logger.warning(f"Sina getStockName returned empty months, raw data keys: {list(result.keys())}")
+    else:
+        logger.info(f"Sina months OK: {months}")
+    return months
 
 
 def _get_option_codes_sina(underlying: str, month: str) -> Tuple[List[str], List[str]]:
@@ -279,7 +310,114 @@ def fetch_50etf_options_yfinance() -> tuple[pd.DataFrame, str]:
     return pd.DataFrame(), "yfinance 无 50ETF 期权数据"
 
 
-__all__ = ["fetch_50etf_options_sina", "fetch_50etf_options_yfinance", "add_implied_volatility"]
+__all__ = ["fetch_50etf_options_sina", "fetch_50etf_options_yfinance", "fetch_50etf_options_eastmoney", "add_implied_volatility"]
+
+
+def fetch_50etf_options_eastmoney() -> tuple[pd.DataFrame, str]:
+    """
+    从东方财富获取 50ETF 期权数据（作为 fallback）
+    
+    返回: (DataFrame, source_msg)
+    """
+    try:
+        url = "http://push2.eastmoney.com/api/qt/clist/get"
+        params = {
+            "pn": "1",
+            "pz": "500",
+            "fs": "m:10+t:3",  # 期权市场
+            "fields": "f12,f13,f14,f2,f3,f15,f16,f17,f18,f152,f5,f6",
+        }
+        headers = get_random_headers("http://quote.eastmoney.com/")
+        
+        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        if not data.get("data") or not data["data"].get("diff"):
+            return pd.DataFrame(), "东方财富无期权数据"
+        
+        items = data["data"]["diff"]
+        rows = []
+        for item in items:
+            code = item.get("f12", "")
+            if "510050" not in code:  # 只保留 50ETF 相关
+                continue
+            
+            rows.append({
+                "代码": code,
+                "名称": item.get("f14", ""),
+                "最新价": item.get("f2", 0) / 1000 if item.get("f2") else 0,
+                "涨跌幅": item.get("f3", 0) / 100 if item.get("f3") else 0,
+                "成交量": item.get("f5", 0),
+                "持仓量": item.get("f152", 0),
+                "买入价": item.get("f17", 0) / 1000 if item.get("f17") else 0,
+                "卖出价": item.get("f18", 0) / 1000 if item.get("f18") else 0,
+            })
+        
+        if not rows:
+            return pd.DataFrame(), "东方财富未找到 50ETF 期权"
+        
+        df = pd.DataFrame(rows)
+        
+        # 从名称判断类型和行权价
+        df["类型"] = df["名称"].apply(lambda x: "认购" if "购" in str(x) else "认沽")
+        df["option_type"] = df["类型"]
+        
+        # 提取行权价（从名称中解析，格式如 "50ETF购3月2800"）
+        def extract_strike(name):
+            import re
+            match = re.search(r'(\d+)$', str(name))
+            if match:
+                return float(match.group(1)) / 1000  # 2800 -> 2.800
+            return 0.0
+        
+        df["行权价"] = df["名称"].apply(extract_strike)
+        
+        logger.info(f"Eastmoney loaded {len(df)} options")
+        return df, "Eastmoney options loaded"
+        
+    except Exception as e:
+        logger.warning(f"Eastmoney options failed: {e}")
+        return pd.DataFrame(), f"东方财富获取失败: {e}"
+
+
+def clean_option_data(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    数据清洗：参考 iVIX 项目的数据处理流程
+    
+    - 移除无效数据（价格为0、行权价为0）
+    - 移除异常波动数据（涨跌幅超过±50%）
+    - 填充缺失值
+    """
+    if df is None or df.empty:
+        return df
+    
+    df = df.copy()
+    
+    # 移除无效数据
+    if "最新价" in df.columns:
+        df = df[df["最新价"] > 0]
+    if "行权价" in df.columns:
+        df = df[df["行权价"] > 0]
+    
+    # 移除异常波动
+    if "涨跌幅" in df.columns:
+        df = df[(df["涨跌幅"] >= -50) & (df["涨跌幅"] <= 50)]
+    
+    # 填充缺失的数值列
+    numeric_cols = ["买入价", "卖出价", "成交量", "持仓量", "涨跌幅"]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = df[col].fillna(0)
+    
+    # 填充缺失的字符串列
+    string_cols = ["代码", "名称"]
+    for col in string_cols:
+        if col in df.columns:
+            df[col] = df[col].fillna("")
+    
+    logger.info(f"Data cleaned: {len(df)} rows remaining")
+    return df
 
 
 def _bs_call_price(S, K, T, r, sigma):
