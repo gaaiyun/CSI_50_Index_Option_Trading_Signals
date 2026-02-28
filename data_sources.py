@@ -50,7 +50,14 @@ def _get_option_months_sina(underlying: str = "510050") -> List[str]:
         data = resp.json()
         result = data.get("result", {}).get("data", {})
         months = result.get("contractMonth", []) or []
-        months = [m for m in months if isinstance(m, str) and m.isdigit()]
+        parsed = []
+        for m in months:
+            if isinstance(m, str):
+                if m.isdigit():
+                    parsed.append(m)
+                elif len(m) == 7 and m[4] == "-":  # "YYYY-MM" -> "YYMM"
+                    parsed.append(m[2:4] + m[5:7])
+        months = parsed
         if not months:
             logger.warning(f"Sina getStockName returned empty months, raw data keys: {list(result.keys())}")
         else:

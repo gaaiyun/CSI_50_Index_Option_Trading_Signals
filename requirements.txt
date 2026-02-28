@@ -8,7 +8,7 @@ requests>=2.31.0,<3.0
 yfinance>=0.2.36
 pyecharts>=2.0.0,<3.0
 # app.py 已实现惰性导入+异常回退，兼容 0.4.x (st_pyecharts) 和 0.5.x (无 st_pyecharts 时用 render_embed)
-streamlit-echarts>=0.4.0
+streamlit-echarts>=0.4.0,<0.5
 simplejson>=3.19.0,<4.0
 
 # akshare 作为期权数据的 fallback 数据源
